@@ -1,0 +1,1678 @@
+# =============================================================================
+#  Configuration Restore — selective file restore card
+#
+#  Requires (all HACS): stack-in-card, mushroom, button-card, card-mod.
+#  Backed by config_restore.yaml and ha_config_restore.py.
+#
+#  HOW IT WORKS
+#    1. Pick a generation and a filter; the file list below re-renders.
+#    2. Tick files, press "Add to queue". Change page or filter and tick more —
+#       the queue persists across pages and even across generations.
+#    3. Open "Restore", arm it, press the button.
+#
+#  Home Assistant has no dynamic checkbox list, so this uses 12 fixed
+#  checkbox entities whose labels come from the sensor, plus paging. Files
+#  marked in red with a warning triangle are registries or auth data that can
+#  lock you out — those additionally need the .storage switch.
+# =============================================================================
+
+type: custom:stack-in-card
+mode: vertical
+cards:
+  - type: custom:mushroom-title-card
+    title: Configuration Restore
+    subtitle: >-
+      {%- set s = 'sensor.config_restore_browser' -%}
+      {%- set q = state_attr(s, 'queue_count') | int(0) -%}
+      {%- set ch = state_attr(s, 'changed_count') | int(0) -%}
+      {%- set nw = state_attr(s, 'new_count') | int(0) -%}
+      {%- set grp = state_attr(s, 'in_group') | int(0) -%}
+      {%- set found = state_attr(s, 'matched') | int(0) -%}
+      {%- set term = state_attr(s, 'search') -%}
+      {{ (q ~ ' queued · ') if q > 0 else '' }}
+      {{ (ch + nw) ~ ' of ' ~ grp ~ ' differ from live' }}
+      {{ (' · ' ~ found ~ ' match “' ~ term ~ '”') if term else '' }}
+    card_mod:
+      style: |
+        :host, .header {
+          padding: 12px 16px 4px 16px !important;
+        }
+        .title {
+          font-family: var(--ha-card-header-font-family, inherit) !important;
+          font-size: var(--ha-card-header-font-size, 24px) !important;
+          font-weight: 400 !important;
+          letter-spacing: -0.012em !important;
+          line-height: 32px !important;
+          color: var(--ha-card-header-color, var(--primary-text-color)) !important;
+          margin: 0 !important;
+        }
+        .subtitle {
+          font-size: 14px !important;
+          font-weight: 400 !important;
+          line-height: 20px !important;
+          color: var(--secondary-text-color) !important;
+          margin: 2px 0 0 0 !important;
+        }
+
+  # --- source and filter -------------------------------------------------------
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+        }
+    entities:
+      - entity: input_select.restore_generation
+        name: Restore from
+        icon: mdi:history
+      - entity: input_select.restore_group
+        name: File type
+        icon: mdi:filter-variant
+      - entity: input_boolean.restore_only_changed
+        name: Only files that differ
+        icon: mdi:file-compare
+        state_color: true
+
+  # --- "Specify files" fold ------------------------------------------------------
+  # A standard toggle row with its switch hidden and a chevron drawn in CSS, so
+  # the header matches the Restore and Queued files folds. HA renders the row,
+  # so its type and inset need no hand-matching.
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+          border-top: 1px solid var(--divider-color);
+          padding-top: 12px !important;
+        }
+    entities:
+      - entity: input_boolean.restore_show_path
+        name: Specify files
+        # Without this the row opens the more-info dialog, since hiding the
+        # switch leaves it with nothing else to do on tap.
+        tap_action:
+          action: toggle
+        card_mod:
+          style:
+            # The icon badge and the name live inside hui-generic-entity-row's
+            # own shadow root, so they need the nested selector. Hiding the
+            # badge and zeroing .info's left margin puts the label flush at the
+            # same 16px inset as the Restore and Queued files headers.
+            hui-generic-entity-row$: |
+              state-badge {
+                display: none !important;
+                width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              :host {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+              }
+              .info {
+                position: relative !important;
+                padding-right: 26px !important;
+                margin-left: 0 !important;
+                margin-inline-start: 0 !important;
+                padding-left: 0 !important;
+                text-indent: 0 !important;
+                font-size: 15px !important;
+                font-weight: 500 !important;
+                line-height: 20px !important;
+                letter-spacing: normal !important;
+                color: var(--primary-text-color) !important;
+              }
+              /* The chevron lives on .info, not on :host::after: WebKit (the iOS app)
+                 does not give a host pseudo-element a positioning context, so an
+                 absolutely positioned :host::after lands at the card's left edge. */
+              .info::after {
+                content: "";
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                width: 9px;
+                height: 9px;
+                margin-top: -6px;
+                border-right: 2.8px solid var(--primary-text-color);
+                border-bottom: 2.8px solid var(--primary-text-color);
+                transform: rotate({{ '-135deg' if is_state('input_boolean.restore_show_path', 'on') else '45deg' }}) translate(-2px, -2px);
+                transition: transform 180ms ease-in-out;
+                pointer-events: none;
+              }
+            .: |
+              :host {
+                position: relative;
+              }
+              ha-entity-toggle,
+              ha-switch,
+              ha-toggle {
+                display: none !important;
+              }
+
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: input_boolean.restore_show_path
+        state: "on"
+    card:
+      type: vertical-stack
+      cards:
+        # --- sub-section: by path ----------------------------------------------
+        # Both sub-headings are native section rows. The first hides its rule
+        # (the fold header above already provides one); the second keeps it, and
+        # that is the light line separating the two methods.
+        - type: entities
+          show_header_toggle: false
+          card_mod:
+            style: |
+              ha-card {
+                box-shadow: none;
+                background: transparent;
+                padding: 0 !important;
+              }
+              #states {
+                padding: 0 16px 4px 16px !important;
+              }
+          entities:
+            - type: section
+              label: Find by path
+              card_mod:
+                style: |
+                  .label {
+                    margin-left: 0 !important;
+                    margin-inline-start: 0 !important;
+                    padding-left: 0 !important;
+                  }
+                  .divider {
+                    display: none !important;
+                  }
+            - entity: input_text.restore_path
+              name: Path or pattern
+              icon: mdi:file-search-outline
+            - type: call-service
+              name: Queue this path
+              icon: mdi:file-plus-outline
+              action_name: QUEUE
+              service: script.turn_on
+              service_data:
+                entity_id: script.restore_add_path
+
+
+        # --- sub-section: by list ----------------------------------------------
+        - type: entities
+          show_header_toggle: false
+          card_mod:
+            style: |
+              ha-card {
+                box-shadow: none;
+                background: transparent;
+                padding: 0 !important;
+              }
+              #states {
+                padding: 0 16px 4px 16px !important;
+              }
+          entities:
+            - type: section
+              label: Find by list
+              card_mod:
+                style: |
+                  .label {
+                    margin-left: 0 !important;
+                    margin-inline-start: 0 !important;
+                    padding-left: 0 !important;
+                  }
+                  .divider {
+                    margin-left: 0 !important;
+                    margin-right: 0 !important;
+                    margin-inline-start: 0 !important;
+                    margin-inline-end: 0 !important;
+                  }
+
+        # --- search within the current file type -----------------------------
+        - type: entities
+          show_header_toggle: false
+          card_mod:
+            style: |
+              ha-card {
+                box-shadow: none;
+                background: transparent;
+                padding: 0 !important;
+              }
+              #states {
+                padding: 0 16px 0 16px !important;
+              }
+          entities:
+            - entity: input_text.restore_search
+              name: Search
+              icon: mdi:magnify
+            - type: call-service
+              name: |
+                Clear search
+              icon: mdi:close-circle-outline
+              action_name: CLEAR
+              service: script.turn_on
+              service_data:
+                entity_id: script.restore_clear_search
+
+        # --- refresh + paging ---------------------------------------------------------
+        - type: grid
+          columns: 4
+          square: false
+          cards:
+            - type: custom:button-card
+              icon: mdi:refresh
+              show_name: false
+              tap_action:
+                action: perform-action
+                perform_action: script.turn_on
+                target:
+                  entity_id: script.restore_refresh
+              hold_action:
+                action: none
+              styles:
+                card:
+                  - padding: 4px
+                  - border: none
+                  - background: none
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const g = states['sensor.config_restore_browser'].attributes.generations;
+                        return (!g || g.length === 0) ? 'var(--error-color)'
+                          : 'var(--secondary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              icon: mdi:chevron-left
+              show_name: false
+              tap_action:
+                action: perform-action
+                perform_action: input_number.decrement
+                target:
+                  entity_id: input_number.restore_page
+              styles:
+                card:
+                  - padding: 4px
+                  - border: none
+                  - background: none
+                icon:
+                  - width: 22px
+                  - color: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.page || 1) > 1
+                          ? 'var(--primary-text-color)' : 'var(--disabled-text-color)';
+                      ]]]
+            - type: custom:button-card
+              show_icon: false
+              show_name: true
+              name: |
+                [[[
+                  const a = states['sensor.config_restore_browser'].attributes;
+                  return `Page ${a.page || 1} / ${a.pages || 1}`;
+                ]]]
+              tap_action:
+                action: none
+              styles:
+                card:
+                  - padding: 4px
+                  - border: none
+                  - background: none
+                name:
+                  - font-size: 13px
+                  - color: var(--secondary-text-color)
+            - type: custom:button-card
+              icon: mdi:chevron-right
+              show_name: false
+              tap_action:
+                action: perform-action
+                perform_action: input_number.increment
+                target:
+                  entity_id: input_number.restore_page
+              styles:
+                card:
+                  - padding: 4px
+                  - border: none
+                  - background: none
+                icon:
+                  - width: 22px
+                  - color: |
+                      [[[
+                        const a = states['sensor.config_restore_browser'].attributes;
+                        return (a.page || 1) < (a.pages || 1)
+                          ? 'var(--primary-text-color)' : 'var(--disabled-text-color)';
+                      ]]]
+
+        # --- sort headers, spreadsheet style ---------------------------------
+        - type: grid
+          columns: 2
+          square: false
+          cards:
+            - type: custom:button-card
+              show_icon: false
+              show_name: true
+              name: |
+                [[[
+                  const sel = states['input_select.restore_sort'].state;
+                  const desc = states['input_boolean.restore_sort_desc'].state === 'on';
+                  const active = sel === 'Name';
+                  return active ? `Name ${desc ? '\u2193' : '\u2191'}` : 'Name';
+                ]]]
+              tap_action:
+                action: perform-action
+                perform_action: script.restore_sort_by
+                data:
+                  field: Name
+              styles:
+                card:
+                  - padding: 2px 8px 6px 8px
+                  - border: none
+                  - background: none
+                name:
+                  - font-size: 12px
+                  - justify-self: |
+                      [[[ return 'Name' === 'Size' ? 'end' : 'start'; ]]]
+                  - color: |
+                      [[[
+                        return states['input_select.restore_sort'].state === 'Name'
+                          ? 'var(--primary-text-color)' : 'var(--secondary-text-color)';
+                      ]]]
+                  - font-weight: |
+                      [[[
+                        return states['input_select.restore_sort'].state === 'Name'
+                          ? '500' : '400';
+                      ]]]
+            - type: custom:button-card
+              show_icon: false
+              show_name: true
+              name: |
+                [[[
+                  const sel = states['input_select.restore_sort'].state;
+                  const desc = states['input_boolean.restore_sort_desc'].state === 'on';
+                  const active = sel === 'Size';
+                  return active ? `Size ${desc ? '\u2193' : '\u2191'}` : 'Size';
+                ]]]
+              tap_action:
+                action: perform-action
+                perform_action: script.restore_sort_by
+                data:
+                  field: Size
+              styles:
+                card:
+                  - padding: 2px 8px 6px 8px
+                  - border: none
+                  - background: none
+                name:
+                  - font-size: 12px
+                  - justify-self: |
+                      [[[ return 'Size' === 'Size' ? 'end' : 'start'; ]]]
+                  - color: |
+                      [[[
+                        return states['input_select.restore_sort'].state === 'Size'
+                          ? 'var(--primary-text-color)' : 'var(--secondary-text-color)';
+                      ]]]
+                  - font-weight: |
+                      [[[
+                        return states['input_select.restore_sort'].state === 'Size'
+                          ? '500' : '400';
+                      ]]]
+
+        # --- the checkbox list -------------------------------------------------------
+        - type: grid
+          columns: 1
+          square: false
+          cards:
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_01
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[0]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[0];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_02
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[1]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[1];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_03
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[2]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[2];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_04
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[3]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[3];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_05
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[4]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[4];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_06
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[5]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[5];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_07
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[6]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[6];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_08
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[7]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[7];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_09
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[8]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[8];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_10
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[9]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[9];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_11
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[10]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[10];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+            - type: custom:button-card
+              entity: input_boolean.restore_slot_12
+              show_name: true
+              show_icon: true
+              show_state: false
+              name: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                  if (!f) return '';
+                  return f.risky ? f.label + '  \u26a0' : f.label;
+                ]]]
+              icon: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                  if (f && f.status === 'identical') return 'mdi:equal';
+                  if (entity.state === 'on') return 'mdi:checkbox-marked';
+                  return f && f.status === 'new'
+                    ? 'mdi:plus-box-outline'
+                    : 'mdi:checkbox-blank-outline';
+                ]]]
+              show_label: true
+              label: |
+                [[[
+                  const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                  return f ? (f.size || '') : '';
+                ]]]
+              tap_action:
+                action: toggle
+              styles:
+                card:
+                  - padding: 6px 8px
+                  - border: none
+                  - background: none
+                  - opacity: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                        return f && f.status === 'identical' ? '0.45' : '1';
+                      ]]]
+                  - pointer-events: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                        return f && f.status === 'identical' ? 'none' : 'auto';
+                      ]]]
+                  - display: |
+                      [[[
+                        return (states['sensor.config_restore_browser'].attributes.files || [])[11]
+                          ? 'block' : 'none';
+                      ]]]
+                grid:
+                  - grid-template-areas: '"i n l"'
+                  - grid-template-columns: 30px 1fr auto
+                  - align-items: center
+                icon:
+                  - width: 20px
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                        if (entity.state === 'on') return f && f.risky
+                          ? 'var(--error-color)' : 'var(--primary-color)';
+                        return 'var(--secondary-text-color)';
+                      ]]]
+                label:
+                  - justify-self: end
+                  - text-align: right
+                  - font-size: 11px
+                  - white-space: nowrap
+                  - padding-left: 8px
+                  - color: var(--secondary-text-color)
+                name:
+                  - justify-self: start
+                  - text-align: left
+                  - font-size: 12px
+                  - white-space: normal
+                  - word-break: break-all
+                  - line-height: 1.25
+                  - color: |
+                      [[[
+                        const f = (states['sensor.config_restore_browser'].attributes.files || [])[11];
+                        return f && f.risky ? 'var(--error-color)'
+                          : 'var(--primary-text-color)';
+                      ]]]
+
+        # --- queue actions -----------------------------------------------------------
+        - type: horizontal-stack
+          cards:
+            - type: custom:mushroom-template-card
+              primary: Add to queue
+              secondary: Ticked files
+              icon: mdi:playlist-plus
+              icon_color: blue
+              tap_action:
+                action: perform-action
+                perform_action: script.turn_on
+                target:
+                  entity_id: script.restore_add_selected
+            - type: custom:mushroom-template-card
+              primary: Clear queue
+              secondary: >-
+                {%- set q = state_attr('sensor.config_restore_browser', 'queue_count') | int(0) -%}
+                {{ q ~ ' queued' }}
+              icon: mdi:playlist-remove
+              icon_color: >-
+                {{ 'orange' if (state_attr('sensor.config_restore_browser', 'queue_count') | int(0)) > 0
+                   else 'grey' }}
+              tap_action:
+                action: perform-action
+                perform_action: script.turn_on
+                target:
+                  entity_id: script.restore_clear_queue
+
+
+  # --- queue contents + the restore controls ----------------------------------
+  # --- "Restore" fold -------------------------------------------------------------
+  # Same construction as "Specify files" rather than a fold-entity-row: identical
+  # markup means identical type, inset and vertical rhythm, and the chevron is
+  # the same CSS one instead of an mdi glyph on its own line.
+  # Reuses input_boolean.restore_show_list, which the earlier layout freed up.
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+          border-top: 1px solid var(--divider-color);
+          padding-top: 12px !important;
+        }
+    entities:
+      - entity: input_boolean.restore_show_list
+        name: Restore
+        tap_action:
+          action: toggle
+        card_mod:
+          style:
+            hui-generic-entity-row$: |
+              state-badge {
+                display: none !important;
+                width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              :host {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+              }
+              .info {
+                position: relative !important;
+                padding-right: 26px !important;
+                margin-left: 0 !important;
+                margin-inline-start: 0 !important;
+                padding-left: 0 !important;
+                text-indent: 0 !important;
+                font-size: 15px !important;
+                font-weight: 500 !important;
+                line-height: 20px !important;
+                letter-spacing: normal !important;
+                color: var(--primary-text-color) !important;
+              }
+              /* The chevron lives on .info, not on :host::after: WebKit (the iOS app)
+                 does not give a host pseudo-element a positioning context, so an
+                 absolutely positioned :host::after lands at the card's left edge. */
+              .info::after {
+                content: "";
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                width: 9px;
+                height: 9px;
+                margin-top: -6px;
+                border-right: 2.8px solid var(--primary-text-color);
+                border-bottom: 2.8px solid var(--primary-text-color);
+                transform: rotate({{ '-135deg' if is_state('input_boolean.restore_show_list', 'on') else '45deg' }}) translate(-2px, -2px);
+                transition: transform 180ms ease-in-out;
+                pointer-events: none;
+              }
+            .: |
+              :host {
+                position: relative;
+              }
+              ha-entity-toggle,
+              ha-switch,
+              ha-toggle {
+                display: none !important;
+              }
+
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: input_boolean.restore_show_list
+        state: "on"
+    card:
+      type: entities
+      show_header_toggle: false
+      card_mod:
+        style: |
+          ha-card {
+            box-shadow: none;
+            background: transparent;
+            padding: 0 !important;
+          }
+          #states {
+            padding: 0 16px 4px 16px !important;
+          }
+      entities:
+        # No last-changed here: it is not on a timer, so an age tells you
+        # nothing and reads like a countdown next to the row below that is one.
+        - entity: input_boolean.restore_allow_storage
+          name: Allow .storage restores
+          icon: mdi:database-lock
+          state_color: true
+        # A timer row: its state text ticks down every second, which a
+        # template cannot do. card_mod restyles that text into a pill so it
+        # reads as a control rather than a label — red while armed, grey and
+        # showing "Idle" when not.
+        - entity: timer.restore_armed
+          name: Arm restore
+          icon: mdi:shield-alert
+          state_color: true
+          tap_action:
+            action: perform-action
+            perform_action: script.turn_on
+            target:
+              entity_id: script.restore_arm_toggle
+          card_mod:
+            style: |
+              .text-content {
+                display: inline-block;
+                min-width: 76px;
+                text-align: center;
+                padding: 4px 14px;
+                border-radius: 999px;
+                font-size: 13px;
+                line-height: 18px;
+                font-variant-numeric: tabular-nums;
+                text-transform: capitalize;
+                transition: background-color 180ms ease-in-out;
+                {% if is_state('timer.restore_armed', 'active') %}
+                background: var(--error-color);
+                color: var(--text-primary-color);
+                border: 1px solid var(--error-color);
+                font-weight: 500;
+                {% else %}
+                background: var(--divider-color);
+                color: var(--secondary-text-color);
+                border: 1px solid var(--divider-color);
+                {% endif %}
+              }
+              :host {
+                cursor: pointer;
+              }
+
+  # --- restore button: appears once armed --------------------------------------
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: timer.restore_armed
+        state: active
+    card:
+      type: custom:mushroom-template-card
+      primary: Restore queued files
+      secondary: >-
+        {%- set q = state_attr('sensor.config_restore_browser', 'queue_count') | int(0) -%}
+        {{ 'Overwrites ' ~ q ~ ' file' ~ ('' if q == 1 else 's') ~ ' — rollback saved' }}
+      icon: mdi:file-restore
+      icon_color: red
+      tap_action:
+        action: perform-action
+        perform_action: script.turn_on
+        target:
+          entity_id: script.restore_execute
+
+
+  # --- what is queued ----------------------------------------------------------
+  - type: markdown
+    card_mod:
+      style:
+        .: |
+          ha-card {
+            box-shadow: none;
+            background: transparent;
+            padding: 0 !important;
+          }
+          ha-markdown {
+            padding: 0 16px 12px 16px !important;
+          }
+        ha-markdown$: |
+          details {
+            border-top: 1px solid var(--divider-color);
+            padding: 12px 0 0 0;
+          }
+          summary {
+            cursor: pointer;
+            margin-left: 0;
+            padding-left: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--primary-text-color);
+            padding: 4px 0;
+            list-style: none;
+          }
+          summary::-webkit-details-marker {
+            display: none;
+          }
+          summary::marker {
+            content: "";
+          }
+          summary::after {
+            content: "";
+            width: 9px;
+            height: 9px;
+            margin-right: 12px;
+            border-right: 2.8px solid var(--primary-text-color);
+            border-bottom: 2.8px solid var(--primary-text-color);
+            transform: rotate(45deg) translate(-2px, -2px);
+            transition: transform 180ms ease-in-out;
+          }
+          details[open] summary::after {
+            transform: rotate(-135deg) translate(-2px, -2px);
+          }
+          ul {
+            margin: 8px 0 0 0;
+            padding-left: 18px;
+            font-size: 12px;
+          }
+          li {
+            margin-bottom: 3px;
+            word-break: break-all;
+          }
+          details > div {
+            padding-top: 14px;
+            font-size: 12px;
+            opacity: 0.8;
+          }
+    content: |
+      {% set s = 'sensor.config_restore_browser' %}
+      {% set q = state_attr(s, 'queue') or [] %}
+      <details>
+      <summary>Queued files ({{ state_attr(s, 'queue_count') | int(0) }})</summary>
+      {% if q | count > 0 %}<ul>
+      {% for f in q %}<li>{{ f }}</li>
+      {% endfor %}</ul>
+      {% else %}<div>Nothing queued. Tick files above and press Add to queue.</div>
+      {% endif %}
+      <div>Source: {{ state_attr(s, 'generation_label') or 'none selected' }} · replaced files are copied to <code>_restore_rollback</code> first</div>
+      </details>

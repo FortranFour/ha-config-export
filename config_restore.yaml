@@ -1,0 +1,497 @@
+# =============================================================================
+#  config_restore.yaml
+#  Drop into /config/packages/ — companion to config_yaml_export.yaml
+#
+#  Drives the "Configuration Restore" card: pick a generation, filter, tick
+#  files, queue them, restore.
+#
+#  Requires ha_config_restore.py alongside ha_config_backup.py in
+#  /share/ha_config_backup/.
+#
+#  SAFETY MODEL
+#    * Nothing is written until you press Restore, and that button does
+#      nothing unless input_boolean.restore_armed is on.
+#    * Restores of .storage files additionally need
+#      input_boolean.restore_allow_storage. Registries and auth data can lock
+#      you out of Home Assistant, so it is a separate, deliberate switch.
+#    * Every overwritten file is copied to _restore_rollback/<timestamp>/
+#      before being replaced. Nothing is ever lost silently.
+#    * The arm switch turns itself off after a restore and after 5 minutes.
+# =============================================================================
+
+shell_command:
+  restore_browse: >-
+    python3 /share/ha_config_backup/ha_config_restore.py --browse
+    --generation "{{ states('input_select.restore_generation') }}"
+    --group "{{ states('input_select.restore_group') }}"
+    --page {{ states('input_number.restore_page') | int(1) }}
+    {% if is_state('input_boolean.restore_only_changed', 'on') %}--only-changed{% endif %}
+    --sort {{ states('input_select.restore_sort') | lower }}
+    {% if is_state('input_boolean.restore_sort_desc', 'on') %}--desc{% endif %}
+    --search "{% set v = states('input_text.restore_search') %}{{ '' if v in
+    ['unknown', 'unavailable', 'none'] else v }}"
+
+  restore_queue_add: >-
+    python3 /share/ha_config_backup/ha_config_restore.py --queue-add "{{ slots }}"
+
+  restore_queue_path: >-
+    python3 /share/ha_config_backup/ha_config_restore.py
+    --queue-path "{{ path }}"
+    --generation "{{ states('input_select.restore_generation') }}"
+
+  restore_queue_clear: >-
+    python3 /share/ha_config_backup/ha_config_restore.py --queue-remove-all
+
+  restore_run: >-
+    python3 /share/ha_config_backup/ha_config_restore.py --restore-queue
+    {% if is_state('input_boolean.restore_allow_storage', 'on') %}--allow-storage{% endif %}
+
+input_select:
+  restore_generation:
+    name: Restore from
+    icon: mdi:history
+    options:
+      - Loading…
+  restore_sort:
+    name: Sort files by
+    icon: mdi:sort
+    options:
+      - Name
+      - Size
+  restore_group:
+    name: Show
+    icon: mdi:filter-variant
+    options:
+      - All files
+      - Dashboards
+      - Top-level YAML
+      - Packages
+      - ESPHome
+      - Helpers & registries
+      - Everything in .storage
+
+input_text:
+  restore_search:
+    # Narrows the Find by list results within the chosen file type.
+    name: Search files
+    icon: mdi:magnify
+    max: 100
+    mode: text
+  restore_path:
+    name: Path to queue
+    icon: mdi:file-search-outline
+    max: 255
+    mode: text
+    # Accepts packages/mail.yaml, /config/packages/mail.yaml, .storage/lovelace,
+    # a pasted Windows path from the share, or a wildcard such as
+    # packages/*.yaml (* stays inside one folder, ** spans folders).
+
+timer:
+  restore_armed:
+    # A timer rather than a boolean: the entity row shows a live countdown, and
+    # expiry is built in instead of needing a separate auto-disarm automation.
+    name: Restore armed
+    icon: mdi:shield-alert
+    duration: "00:05:00"
+
+input_number:
+  restore_page:
+    name: Page
+    icon: mdi:book-open-page-variant
+    min: 1
+    max: 60
+    step: 1
+    mode: box
+
+input_boolean:
+  restore_slot_01: {name: Restore slot 1, icon: mdi:checkbox-blank-outline}
+  restore_slot_02: {name: Restore slot 2, icon: mdi:checkbox-blank-outline}
+  restore_slot_03: {name: Restore slot 3, icon: mdi:checkbox-blank-outline}
+  restore_slot_04: {name: Restore slot 4, icon: mdi:checkbox-blank-outline}
+  restore_slot_05: {name: Restore slot 5, icon: mdi:checkbox-blank-outline}
+  restore_slot_06: {name: Restore slot 6, icon: mdi:checkbox-blank-outline}
+  restore_slot_07: {name: Restore slot 7, icon: mdi:checkbox-blank-outline}
+  restore_slot_08: {name: Restore slot 8, icon: mdi:checkbox-blank-outline}
+  restore_slot_09: {name: Restore slot 9, icon: mdi:checkbox-blank-outline}
+  restore_slot_10: {name: Restore slot 10, icon: mdi:checkbox-blank-outline}
+  restore_slot_11: {name: Restore slot 11, icon: mdi:checkbox-blank-outline}
+  restore_slot_12: {name: Restore slot 12, icon: mdi:checkbox-blank-outline}
+  restore_show_path:
+    # The two selection sub-sections. Both are plain toggle rows on the card so
+    # they render identically — HA draws them, so nothing is hand-matched.
+    name: Find by path
+    icon: mdi:file-search-outline
+  restore_show_list:
+    name: Find by list
+    icon: mdi:format-list-checks
+  restore_sort_desc:
+    # Descending when on. Tapping the active sort header flips it.
+    name: Sort descending
+    icon: mdi:sort-descending
+  restore_only_changed:
+    # On by default: hide files whose archived copy is byte-identical to the
+    # live one, since restoring those would do nothing.
+    name: Only files that differ
+    icon: mdi:file-compare
+  restore_allow_storage:
+    # Gates ALL of .storage, which is a superset of the files flagged red in the
+    # list, so a lock icon rather than a warning triangle.
+    name: Allow .storage restores
+    icon: mdi:database-lock
+
+command_line:
+  - sensor:
+      name: "Config Restore Browser"
+      unique_id: config_restore_browser
+      # Falls back to an empty object so the sensor stays available before the
+      # first browse rather than going unknown.
+      command: "cat /share/ha_config_backup/_restore_state.json 2>/dev/null || echo '{}'"
+      value_template: "{{ value_json.queue_count | default(0) }}"
+      unit_of_measurement: "queued"
+      json_attributes:
+        - generation
+        - generation_label
+        - group
+        - page
+        - pages
+        - total
+        - in_group
+        - matched
+        - search
+        - only_changed
+        - sort
+        - sort_desc
+        - changed_count
+        - identical_count
+        - new_count
+        - files
+        - queue_count
+        - queue
+        - queue_generations
+        - generations
+        - updated
+        - error
+      scan_interval: 3600
+
+script:
+  # ---- refresh the browser view -------------------------------------------
+  restore_refresh:
+    alias: Restore refresh view
+    icon: mdi:refresh
+    mode: restart
+    sequence:
+      - action: shell_command.restore_browse
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.config_restore_browser
+      # Keep the generation dropdown in step with what is actually on disk
+      - variables:
+          found: "{{ state_attr('sensor.config_restore_browser', 'generations') }}"
+      - if:
+          - condition: template
+            value_template: "{{ found is iterable and found | count > 0 }}"
+        then:
+          - action: input_select.set_options
+            target:
+              entity_id: input_select.restore_generation
+            data:
+              options: "{{ found }}"
+
+  # ---- add ticked slots to the queue --------------------------------------
+  restore_add_selected:
+    alias: Restore add selected to queue
+    icon: mdi:playlist-plus
+    mode: single
+    sequence:
+      - variables:
+          slots: >-
+            {% set ns = namespace(picked=[]) %}
+            {% for i in range(1, 13) %}
+              {% set ent = 'input_boolean.restore_slot_%02d' | format(i) %}
+              {% if is_state(ent, 'on') %}{% set ns.picked = ns.picked + [i | string] %}{% endif %}
+            {% endfor %}
+            {{ ns.picked | join(',') }}
+      - condition: template
+        value_template: "{{ slots | length > 0 }}"
+      - action: shell_command.restore_queue_add
+        data:
+          slots: "{{ slots }}"
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.restore_slot_01
+            - input_boolean.restore_slot_02
+            - input_boolean.restore_slot_03
+            - input_boolean.restore_slot_04
+            - input_boolean.restore_slot_05
+            - input_boolean.restore_slot_06
+            - input_boolean.restore_slot_07
+            - input_boolean.restore_slot_08
+            - input_boolean.restore_slot_09
+            - input_boolean.restore_slot_10
+            - input_boolean.restore_slot_11
+            - input_boolean.restore_slot_12
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # ---- clear the search box -------------------------------------------------
+  restore_clear_search:
+    alias: Restore clear search
+    icon: mdi:close-circle-outline
+    mode: single
+    sequence:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.restore_search
+        data:
+          value: ""
+
+  # ---- sort headers ---------------------------------------------------------
+  # Tapping the inactive column switches to it ascending; tapping the active
+  # one flips direction. Same behaviour as a spreadsheet column header.
+  restore_sort_by:
+    alias: Restore sort by
+    icon: mdi:sort
+    mode: single
+    fields:
+      field:
+        name: Field
+        description: Name or Size
+        required: true
+        selector:
+          text:
+    sequence:
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('input_select.restore_sort') | lower == field | lower }}
+        then:
+          - action: input_boolean.toggle
+            target:
+              entity_id: input_boolean.restore_sort_desc
+        else:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.restore_sort
+            data:
+              option: "{{ field | title }}"
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.restore_sort_desc
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # ---- add by typed or pasted path -----------------------------------------
+  restore_add_path:
+    alias: Restore add path to queue
+    icon: mdi:file-search-outline
+    mode: single
+    sequence:
+      - variables:
+          typed: >-
+            {% set v = states('input_text.restore_path') %}
+            {{ '' if v in ['unknown', 'unavailable', 'none'] else v | trim }}
+      - condition: template
+        value_template: "{{ typed | length > 0 }}"
+      - action: shell_command.restore_queue_path
+        data:
+          path: "{{ typed }}"
+        response_variable: result
+      - variables:
+          parsed: "{{ result.stdout | from_json if result.stdout else {} }}"
+      - if:
+          - condition: template
+            value_template: "{{ parsed.added | default(0) > 0 }}"
+        then:
+          # Clear the box only on success, so a typo stays put for editing
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.restore_path
+            data:
+              value: ""
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: restore_path_error
+        else:
+          - action: persistent_notification.create
+            data:
+              notification_id: restore_path_error
+              title: Nothing matched that path
+              message: >-
+                `{{ typed }}` resolved to `{{ parsed.resolved | default('?') }}`,
+                which is not in
+                {{ states('input_select.restore_generation') }}.
+
+                {% if parsed.suggestions | default([]) | count > 0 %}
+                Did you mean:
+                {% for s in parsed.suggestions %}
+                - `{{ s }}`
+                {% endfor %}
+                {% else %}
+                Try a wildcard such as `**/*mail*` to search everywhere.
+                {% endif %}
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # ---- empty the queue ------------------------------------------------------
+  restore_clear_queue:
+    alias: Restore clear queue
+    icon: mdi:playlist-remove
+    mode: single
+    sequence:
+      - action: shell_command.restore_queue_clear
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # ---- arm / disarm ----------------------------------------------------------
+  restore_arm_toggle:
+    alias: Restore arm toggle
+    icon: mdi:shield-alert
+    mode: single
+    sequence:
+      - if:
+          - condition: state
+            entity_id: timer.restore_armed
+            state: active
+        then:
+          - action: timer.cancel
+            target:
+              entity_id: timer.restore_armed
+        else:
+          - action: timer.start
+            target:
+              entity_id: timer.restore_armed
+
+  # ---- do it ----------------------------------------------------------------
+  restore_execute:
+    alias: Restore queued files
+    icon: mdi:file-restore
+    mode: single
+    sequence:
+      # Refuses unless armed. The card's Restore button is disabled-looking
+      # until then, but this is the real gate.
+      - condition: state
+        entity_id: timer.restore_armed
+        state: active
+
+      # A fresh export first, so there is always a way back to the state of
+      # things immediately before the restore.
+      - action: script.turn_on
+        target:
+          entity_id: script.config_export_run_now
+      - delay: "00:00:20"
+
+      - action: shell_command.restore_run
+        response_variable: result
+      - variables:
+          parsed: "{{ result.stdout | from_json if result.stdout else {} }}"
+
+      - action: timer.cancel
+        target:
+          entity_id: timer.restore_armed
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+      - action: persistent_notification.create
+        data:
+          notification_id: config_restore_result
+          title: >-
+            Restore {{ parsed.status | default('failed') }} —
+            {{ parsed.restored | default(0) }} file(s)
+          message: >-
+            {% if parsed.restored | default(0) > 0 %}
+            Restored:
+            {% for f in parsed.restored_files %}
+            - `{{ f }}`
+            {% endfor %}
+
+            Previous versions saved to `{{ parsed.rollback }}`.
+
+            {% if parsed.needs_restart %}**A .storage file changed — restart Home
+            Assistant for it to take effect.**{% else %}Reload the relevant YAML
+            (Developer Tools → YAML) or restart to apply.{% endif %}
+            {% else %}
+            Nothing was restored.
+            {% endif %}
+            {% if parsed.skipped | default([]) | count > 0 %}
+
+            Skipped: {{ parsed.skipped | join(', ') }}
+            {% endif %}
+            {% if parsed.errors | default([]) | count > 0 %}
+
+            Errors: {{ parsed.errors | join(', ') }}
+            {% endif %}
+
+automation:
+  # Any change to the selectors re-renders the file list
+  - id: config_restore_refresh_on_change
+    alias: Config restore refresh on selection change
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id:
+          - input_select.restore_generation
+          - input_select.restore_group
+          - input_number.restore_page
+          - input_boolean.restore_only_changed
+          - input_select.restore_sort
+          - input_boolean.restore_sort_desc
+          - input_text.restore_search
+    actions:
+      - delay: "00:00:01"
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # Reset paging when the generation or filter changes, so you never land on
+  # page 7 of a 2-page list
+  - id: config_restore_reset_page
+    alias: Config restore reset page
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id:
+          - input_select.restore_generation
+          - input_select.restore_group
+          - input_boolean.restore_only_changed
+          - input_select.restore_sort
+          - input_boolean.restore_sort_desc
+          - input_text.restore_search
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.restore_page
+        data:
+          value: 1
+
+  # Populate the dropdown at startup, and again if it is ever left empty.
+  # The time_pattern trigger is a cheap safety net: it only does anything when
+  # the list has not been filled in yet.
+  - id: config_restore_populate_on_start
+    alias: Config restore populate generations at start
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_select.restore_generation
+            state: "Loading…"
+          - condition: template
+            value_template: >-
+              {{ state_attr('sensor.config_restore_browser', 'generations') is not iterable
+                 or (state_attr('sensor.config_restore_browser', 'generations') | count) == 0 }}
+    actions:
+      - delay: "00:00:05"
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh

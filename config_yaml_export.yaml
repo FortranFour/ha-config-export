@@ -1,0 +1,195 @@
+# =============================================================================
+#  config_yaml_export.yaml
+#  Drop into /config/packages/ — picked up by `packages: !include_dir_named packages`
+#
+#  Backend for the "Configuration Export" dashboard card. Schedules and reports
+#  on ha_config_backup.py, which lives in the Samba share at
+#  /share/ha_config_backup/ so Home Assistant updates cannot touch it.
+#
+#  Entities created:
+#    input_datetime.config_export_time   run time, settable from the card
+#    script.config_export_run_now        "Back up now" button
+#    automation.config_export_daily      the schedule
+#    sensor.config_export_status         status + per-tier generation inventory
+#
+# -----------------------------------------------------------------------------
+#  MAKING THE CARD'S FOLDER BUTTONS CLICKABLE (Edge / Chrome, Windows)
+# -----------------------------------------------------------------------------
+#  The Daily / Weekly / Monthly / Yearly buttons on the card point at
+#  file://homeassistant/share/ha_config_backup/<tier>/. Browsers block file://
+#  links opened from an http(s) page by default, so out of the box those
+#  buttons do nothing. One registry policy re-enables them.
+#
+#  Run an ELEVATED Command Prompt (Win+X > Terminal (Admin)) and paste the
+#  line for your browser:
+#
+#    Edge:
+#      reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\URLAllowlist" /v 1 /t REG_SZ /d "file:///" /f
+#
+#    Chrome:
+#      reg add "HKLM\SOFTWARE\Policies\Google\Chrome\URLAllowlist" /v 1 /t REG_SZ /d "file:///" /f
+#
+#  Fully close and reopen the browser (check Task Manager for leftover
+#  processes). Confirm it took at edge://policy or chrome://policy — look for
+#  URLAllowlist with the value file:///.
+#
+#  To undo:
+#      reg delete "HKLM\SOFTWARE\Policies\Microsoft\Edge\URLAllowlist" /v 1 /f
+#
+#  Notes:
+#    - This whitelists ALL file:// links, not just these. Any page you visit
+#      can then offer clickable links to your local filesystem. Clicking is
+#      still required, but it is a real loosening of a browser default.
+#    - The policy affects the desktop browser only. The Home Assistant
+#      companion app cannot open file:// under any configuration.
+#    - Prefer a drive letter? Map the share to Z: in Explorer, then edit the
+#      four url_path lines in the card to file:///Z:/daily/, file:///Z:/weekly/
+#      and so on. Same policy requirement applies.
+#    - Not comfortable with the policy? Leave it alone. The card prints the
+#      UNC paths as selectable text underneath the table — copy one into
+#      Explorer's address bar and it opens with no changes to your browser.
+# =============================================================================
+
+shell_command:
+  config_yaml_export: "python3 /share/ha_config_backup/ha_config_backup.py"
+  # Diagnostics. Run from Developer Tools > Actions and read the response:
+  # it reports the resolved config directory, write access and file counts.
+  config_yaml_export_check: "python3 /share/ha_config_backup/ha_config_backup.py --check"
+
+input_boolean:
+  export_show_schedule:
+    # Drives the "Schedule" fold on the dashboard card, for both tabs. Purely
+    # UI state, so one helper on this server covers both.
+    name: Show export schedule
+    icon: mdi:calendar-clock
+
+input_datetime:
+  config_export_time:
+    name: Config export time
+    icon: mdi:clock-outline
+    has_date: false
+    has_time: true
+
+command_line:
+  - sensor:
+      name: "Config Export Status"
+      unique_id: config_yaml_export_status
+      command: "python3 /share/ha_config_backup/ha_config_backup.py --report"
+      value_template: "{{ value_json.status }}"
+      json_attributes:
+        - root
+        - generated
+        - daily
+        - weekly
+        - monthly
+        - yearly
+        - total_mb
+        - total_generations
+        - unique_generations
+        - last_run
+      scan_interval: 900
+      command_timeout: 30
+
+script:
+  config_export_run_now:
+    alias: Config export run now
+    icon: mdi:play-circle-outline
+    mode: single
+    sequence:
+      - action: shell_command.config_yaml_export
+        response_variable: export
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.config_export_status
+      - if:
+          - condition: template
+            value_template: "{{ export.returncode | int(1) != 0 }}"
+        then:
+          # persistent_notification first: it always exists, so a wrong
+          # notify service name can no longer swallow the failure.
+          - action: persistent_notification.create
+            data:
+              notification_id: config_export_failed
+              title: Config export failed
+              message: >-
+                Exit code {{ export.returncode }}.
+
+                {{ (export.stderr or export.stdout or 'No output.')
+                   | truncate(600) }}
+          # OPTIONAL push to your phone. Replace this with your own notify
+          # service, or delete the whole action — the persistent notification
+          # above always fires, so failures are reported either way.
+          - action: notify.mobile_app_YOUR_PHONE
+            continue_on_error: true
+            data:
+              title: Config export failed
+              message: >-
+                Exit {{ export.returncode }}. {{ (export.stderr or export.stdout)
+                | replace('\n', ' ') | truncate(180) }}
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: config_export_failed
+          # ---------------------------------------------------------------
+          # Success notification — OFF by default. It fires on every run,
+          # including the nightly one, so most people will not want a daily
+          # "it worked" message. Uncomment the block below to switch it on.
+          # It reuses a single notification_id, so it replaces itself rather
+          # than stacking up.
+          #
+          # - action: persistent_notification.create
+          #   data:
+          #     notification_id: config_export_ok
+          #     title: Config export complete
+          #     message: >-
+          #       {{ state_attr('sensor.config_export_status', 'last_run').files }} files,
+          #       {{ state_attr('sensor.config_export_status', 'last_run').converted }}
+          #       converted to YAML,
+          #       {{ state_attr('sensor.config_export_status', 'total_mb') }} MB on disk.
+          # ---------------------------------------------------------------
+
+automation:
+  - id: config_export_daily
+    alias: Config export daily
+    description: >-
+      Runs the YAML/JSON configuration export at the time set on the dashboard
+      card, keeping 7 daily / 4 weekly / 12 monthly / 5 yearly generations.
+      A restart only triggers an export if the last one is over a day old.
+    mode: single
+    triggers:
+      - trigger: time
+        at: input_datetime.config_export_time
+        id: scheduled
+      - trigger: homeassistant
+        event: start
+        id: startup
+    actions:
+      - choose:
+          # Restart path: settle, refresh the sensor, THEN judge staleness.
+          # The staleness check has to come after the refresh — at startup the
+          # command_line sensor has not polled yet and reads as unknown, which
+          # would look like "never run" and export on every restart.
+          - conditions:
+              - condition: trigger
+                id: startup
+            sequence:
+              - delay: "00:00:30"
+              - action: homeassistant.update_entity
+                target:
+                  entity_id: sensor.config_export_status
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {% set lr = state_attr('sensor.config_export_status', 'last_run') %}
+                      {{ lr is not mapping or lr.timestamp is not defined
+                         or (now() - (lr.timestamp | as_datetime | as_local)).total_seconds()
+                            > 86400 }}
+                then:
+                  - action: script.turn_on
+                    target:
+                      entity_id: script.config_export_run_now
+        # Scheduled runs and manual "Run actions" go straight through.
+        default:
+          - action: script.turn_on
+            target:
+              entity_id: script.config_export_run_now

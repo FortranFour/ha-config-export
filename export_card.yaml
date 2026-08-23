@@ -1,0 +1,447 @@
+# =============================================================================
+#  Configuration Export — dashboard card
+#  Add via "Add card" -> "Manual".
+#
+#  Requires (all HACS): stack-in-card, mushroom, button-card, card-mod.
+#
+#  Adjust the UNC host in the four url_path lines if your share is not
+#  \\homeassistant\share (e.g. use the HA IP address instead). Those buttons
+#  need a one-time browser policy to be clickable — see the header comment in
+#  config_yaml_export.yaml.
+# =============================================================================
+
+type: custom:stack-in-card
+mode: vertical
+cards:
+  # --- Title: styled to match a native ha-card header (Rodents, System, ...) --
+  - type: custom:mushroom-title-card
+    title: Configuration Export
+    subtitle: >-
+      {%- set s = 'sensor.config_export_status' -%}
+      {%- set n = namespace(t=0) -%}
+      {%- for k in ['daily','weekly','monthly','yearly'] -%}
+      {%- set n.t = n.t + (state_attr(s, k) or {}).get('count', 0) -%}
+      {%- endfor -%}
+      {%- set u = state_attr(s, 'unique_generations') or 0 -%}
+      {{ n.t ~ ' generation' ~ ('' if n.t == 1 else 's')
+         ~ ((' (' ~ u ~ ' unique)') if u > 0 and u < n.t else '')
+         ~ ' · ' ~ (state_attr(s, 'total_mb') or 0) ~ ' MB on disk' }}
+    card_mod:
+      style: |
+        :host, .header {
+          padding: 12px 16px 4px 16px !important;
+        }
+        .title {
+          font-family: var(--ha-card-header-font-family, inherit) !important;
+          font-size: var(--ha-card-header-font-size, 24px) !important;
+          font-weight: 400 !important;
+          letter-spacing: -0.012em !important;
+          line-height: 32px !important;
+          color: var(--ha-card-header-color, var(--primary-text-color)) !important;
+          margin: 0 !important;
+        }
+        .subtitle {
+          font-size: 14px !important;
+          font-weight: 400 !important;
+          line-height: 20px !important;
+          color: var(--secondary-text-color) !important;
+          margin: 2px 0 0 0 !important;
+        }
+
+  # --- Status + run button ----------------------------------------------------
+  - type: horizontal-stack
+    cards:
+      - type: custom:mushroom-template-card
+        entity: sensor.config_export_status
+        primary: >-
+          {% set s = states('sensor.config_export_status') %} {{ 'Healthy' if s
+          == 'ok' else ('Problems' if s == 'error' else 'Never run') }}
+        secondary: >-
+          {%- set lr = state_attr('sensor.config_export_status','last_run') -%}
+          {%- if lr and lr.timestamp is defined -%}
+          {%- set d = (now() - (lr.timestamp | as_datetime | as_local)).total_seconds() -%}
+          {%- if d < 3600 -%}{%- set ago = (d // 60) | int ~ 'm' -%}
+          {%- elif d < 86400 -%}{%- set ago = (d // 3600) | int ~ 'h' -%}
+          {%- else -%}{%- set ago = (d // 86400) | int ~ 'd' -%}{%- endif -%}
+          {{ ago ~ ' ago · YAML ' ~ (lr.yaml_files | default(0)) ~ ' · JSON '
+             ~ (lr.json_files | default(0)) }}
+          {%- else -%}Waiting for the first run{%- endif -%}
+        multiline_secondary: true
+        icon: >-
+          {% set s = states('sensor.config_export_status') %} {{
+          'mdi:content-save-check' if s == 'ok'
+             else ('mdi:content-save-alert' if s == 'error' else 'mdi:content-save-off') }}
+        icon_color: >-
+          {% set s = states('sensor.config_export_status') %} {{ 'green' if s ==
+          'ok' else ('red' if s == 'error' else 'grey') }}
+        tap_action:
+          action: more-info
+        # Wrap onto a second line instead of truncating with an ellipsis
+        card_mod:
+          style:
+            mushroom-state-info$: |
+              .container {
+                white-space: normal !important;
+                overflow: visible !important;
+              }
+              .primary, .secondary {
+                white-space: normal !important;
+                overflow: visible !important;
+                text-overflow: clip !important;
+                line-height: 1.25 !important;
+              }
+            .: |
+              ha-card { --ha-card-border-width: 0; }
+
+      - type: custom:mushroom-template-card
+        entity: script.config_export_run_now
+        primary: Back up now
+        secondary: |-
+          {% if is_state('script.config_export_run_now','on') %}
+            Running…
+          {% else %}
+            Export and rotate
+          {% endif %}
+        multiline_secondary: true
+        icon: >-
+          {{ 'mdi:progress-download' if
+          is_state('script.config_export_run_now','on')
+             else 'mdi:play-circle-outline' }}
+        icon_color: >-
+          {{ 'orange' if is_state('script.config_export_run_now','on') else
+          'blue' }}
+        tap_action:
+          action: perform-action
+          perform_action: script.config_export_run_now
+        card_mod:
+          style:
+            mushroom-state-info$: |
+              .container {
+                white-space: normal !important;
+                overflow: visible !important;
+              }
+              .primary, .secondary {
+                white-space: normal !important;
+                overflow: visible !important;
+                text-overflow: clip !important;
+                line-height: 1.25 !important;
+              }
+            .: |
+              ha-card { --ha-card-border-width: 0; }
+
+  # --- Generation tiers: moved up, directly under the status row --------------
+  - type: grid
+    columns: 4
+    square: false
+    cards:
+      - type: custom:button-card
+        entity: sensor.config_export_status
+        name: Daily
+        icon: mdi:calendar-today
+        show_state: false
+        show_label: true
+        label: |
+          [[[
+            const t = entity.attributes.daily || {};
+            return `${t.count ?? 0}/${t.keep ?? 0} · ${t.mb ?? 0} MB`;
+          ]]]
+        tap_action:
+          action: url
+          url_path: file://homeassistant/share/ha_config_backup/daily/
+        hold_action:
+          action: more-info
+        styles:
+          card:
+            - padding: 10px 4px
+            - border: none
+            - background: none
+          name:
+            - font-size: 13px
+          label:
+            - font-size: 11px
+            - color: var(--secondary-text-color)
+          icon:
+            - color: var(--state-icon-color)
+      - type: custom:button-card
+        entity: sensor.config_export_status
+        name: Weekly
+        icon: mdi:calendar-week
+        show_state: false
+        show_label: true
+        label: |
+          [[[
+            const t = entity.attributes.weekly || {};
+            return `${t.count ?? 0}/${t.keep ?? 0} · ${t.mb ?? 0} MB`;
+          ]]]
+        tap_action:
+          action: url
+          url_path: file://homeassistant/share/ha_config_backup/weekly/
+        hold_action:
+          action: more-info
+        styles:
+          card:
+            - padding: 10px 4px
+            - border: none
+            - background: none
+          name:
+            - font-size: 13px
+          label:
+            - font-size: 11px
+            - color: var(--secondary-text-color)
+      - type: custom:button-card
+        entity: sensor.config_export_status
+        name: Monthly
+        icon: mdi:calendar-month
+        show_state: false
+        show_label: true
+        label: |
+          [[[
+            const t = entity.attributes.monthly || {};
+            return `${t.count ?? 0}/${t.keep ?? 0} · ${t.mb ?? 0} MB`;
+          ]]]
+        tap_action:
+          action: url
+          url_path: file://homeassistant/share/ha_config_backup/monthly/
+        hold_action:
+          action: more-info
+        styles:
+          card:
+            - padding: 10px 4px
+            - border: none
+            - background: none
+          name:
+            - font-size: 13px
+          label:
+            - font-size: 11px
+            - color: var(--secondary-text-color)
+      - type: custom:button-card
+        entity: sensor.config_export_status
+        name: Yearly
+        icon: mdi:calendar-star
+        show_state: false
+        show_label: true
+        label: |
+          [[[
+            const t = entity.attributes.yearly || {};
+            return `${t.count ?? 0}/${t.keep ?? 0} · ${t.mb ?? 0} MB`;
+          ]]]
+        tap_action:
+          action: url
+          url_path: file://homeassistant/share/ha_config_backup/yearly/
+        hold_action:
+          action: more-info
+        styles:
+          card:
+            - padding: 10px 4px
+            - border: none
+            - background: none
+          name:
+            - font-size: 13px
+          label:
+            - font-size: 11px
+            - color: var(--secondary-text-color)
+
+  # --- "Schedule" fold -----------------------------------------------------------
+  # A standard toggle row with its switch hidden and a chevron drawn in CSS,
+  # rather than a fold-entity-row. Home Assistant renders the row, so its
+  # weight, inset and vertical rhythm match the Generations header below with
+  # no hand-matched section-label styling.
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+          border-top: 1px solid var(--divider-color);
+          padding-top: 12px !important;
+        }
+    entities:
+      - entity: input_boolean.export_show_schedule
+        name: Schedule
+        # Hiding the switch leaves the row with nothing to do on tap, so it
+        # would otherwise open the more-info dialog.
+        tap_action:
+          action: toggle
+        card_mod:
+          style:
+            # The icon badge and label live in hui-generic-entity-row's own
+            # shadow root, hence the nested selector.
+            hui-generic-entity-row$: |
+              state-badge {
+                display: none !important;
+                width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              :host {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+              }
+              .info {
+                position: relative !important;
+                padding-right: 26px !important;
+                margin-left: 0 !important;
+                margin-inline-start: 0 !important;
+                padding-left: 0 !important;
+                text-indent: 0 !important;
+                font-size: 15px !important;
+                font-weight: 500 !important;
+                line-height: 20px !important;
+                letter-spacing: normal !important;
+                color: var(--primary-text-color) !important;
+              }
+              /* The chevron lives on .info, not on :host::after: WebKit (the iOS app)
+                 does not give a host pseudo-element a positioning context, so an
+                 absolutely positioned :host::after lands at the card's left edge. */
+              .info::after {
+                content: "";
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                width: 9px;
+                height: 9px;
+                margin-top: -6px;
+                border-right: 2.8px solid var(--primary-text-color);
+                border-bottom: 2.8px solid var(--primary-text-color);
+                transform: rotate({{ '-135deg' if is_state('input_boolean.export_show_schedule', 'on') else '45deg' }}) translate(-2px, -2px);
+                transition: transform 180ms ease-in-out;
+                pointer-events: none;
+              }
+            .: |
+              :host {
+                position: relative;
+              }
+              ha-entity-toggle,
+              ha-switch,
+              ha-toggle {
+                display: none !important;
+              }
+
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: input_boolean.export_show_schedule
+        state: "on"
+    card:
+      type: entities
+      show_header_toggle: false
+      card_mod:
+        style: |
+          ha-card {
+            box-shadow: none;
+            background: transparent;
+            padding: 0 !important;
+          }
+          #states {
+            padding: 0 16px 4px 16px !important;
+          }
+      entities:
+        - entity: input_datetime.config_export_time
+          name: Daily run time
+          icon: mdi:clock-outline
+        - entity: automation.config_export_daily
+          name: Schedule enabled
+          secondary_info: last-triggered
+          state_color: true
+
+  # --- Generations: native <details>, styled to match the Schedule header -----
+  - type: markdown
+    card_mod:
+      style:
+        .: |
+          ha-card {
+            box-shadow: none;
+            background: transparent;
+            padding: 0 !important;
+          }
+          /* Matches #states on the entities card above */
+          ha-markdown {
+            padding: 0 16px 12px 16px !important;
+          }
+        ha-markdown$: |
+          details {
+            border-top: 1px solid var(--divider-color);
+            padding: 12px 0 0 0;
+          }
+          /* Matches the Schedule header above: label left, chevron right */
+          summary {
+            cursor: pointer;
+            margin-left: 0;
+            padding-left: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--primary-text-color);
+            padding: 4px 0;
+            list-style: none;
+          }
+          summary::-webkit-details-marker {
+            display: none;
+          }
+          summary::marker {
+            content: "";
+          }
+          summary::after {
+            content: "";
+            width: 9px;
+            height: 9px;
+            /* Same 12px inset as the Schedule header's chevron. */
+            margin-right: 12px;
+            border-right: 2.8px solid var(--primary-text-color);
+            border-bottom: 2.8px solid var(--primary-text-color);
+            transform: rotate(45deg) translate(-2px, -2px);
+            transition: transform 180ms ease-in-out;
+          }
+          details[open] summary::after {
+            transform: rotate(-135deg) translate(-2px, -2px);
+          }
+          /* NOTE: the markdown card strips class= and style= attributes, so
+             everything below has to be element/position based. */
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            margin-top: 10px;
+          }
+          td, th {
+            padding: 5px 6px;
+            vertical-align: top;
+            text-align: left;
+          }
+          th {
+            border-bottom: 1px solid var(--divider-color);
+            font-weight: 500;
+          }
+          /* Kept + Size columns right-aligned */
+          th:nth-child(2), th:nth-child(3),
+          td:nth-child(2), td:nth-child(3) {
+            text-align: right;
+            white-space: nowrap;
+          }
+          /* Tier name */
+          td:first-child {
+            font-weight: 600;
+          }
+          /* Share path line: the div that follows the table */
+          details > div {
+            padding-top: 22px;
+            font-size: 12px;
+            opacity: 0.8;
+          }
+    content: |
+      {% set s = 'sensor.config_export_status' %}
+      <details>
+      <summary>Generations</summary>
+      <table>
+      <tr><th>Tier</th><th>Kept</th><th>Size</th><th>Newest</th></tr>
+      {% for label, key in [('Daily','daily'), ('Weekly','weekly'), ('Monthly','monthly'), ('Yearly','yearly')] %}{% set t = state_attr(s, key) or {} %}<tr><td>{{ label }}</td><td>{{ t.get('count', 0) }} / {{ t.get('keep', 0) }}</td><td>{{ t.get('mb', 0) }} MB</td><td><code>{{ t.get('newest', '—') }}</code></td></tr>
+      {% endfor %}</table>
+      <div>Share path: <code>\\homeassistant\share\ha_config_backup</code></div>
+      </details>

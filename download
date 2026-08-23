@@ -1,0 +1,22 @@
+# Never commit export output — it contains unredacted secrets
+daily/
+weekly/
+monthly/
+yearly/
+latest/
+logs/
+_restore_rollback/
+_restore_state.json
+_restore_queue.json
+_restore_diff_cache.json
+*.tar.gz
+
+# Never commit a real Home Assistant config
+secrets.yaml
+.storage/
+*.db
+*.log
+
+__pycache__/
+*.py[cod]
+.DS_Store
