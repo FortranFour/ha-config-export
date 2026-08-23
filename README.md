@@ -46,8 +46,8 @@ Typical export here: ~190 files, ~120 converted to YAML, ~4 MB compressed, about
 
 <img width="512" height="367" alt="Screenshot 2026-08-22 174840" src="https://github.com/user-attachments/assets/c749e24a-6c39-4a59-8097-2760b29248a5" />
 <img width="511" height="657" alt="Screenshot 2026-08-22 174601" src="https://github.com/user-attachments/assets/91a2015e-b264-4150-9686-6a780df1b92d" />
-<img width="507" height="432" alt="Screenshot 2026-08-22 174728" src="https://github.com/user-attachments/assets/34de3446-f1d8-4e54-87a3-263b91777cb3" />
-<img width="512" height="1590" alt="Screenshot 2026-08-22 174652" src="https://github.com/user-attachments/assets/bdc17a2c-2463-44c2-bee4-ff4337d262a9" />
+<img width="485" height="432" alt="Screenshot 2026-08-22 194926" src="https://github.com/user-attachments/assets/8bf1fad5-2761-451e-8723-bed903dc4a9e" />
+<img width="485" height="1611" alt="Screenshot 2026-08-22 195019" src="https://github.com/user-attachments/assets/c84c80f3-e528-4d13-8419-bae1f0b68866" />
 <img width="1207" height="507" alt="Screenshot 2026-08-22 185634" src="https://github.com/user-attachments/assets/7f44e59d-df7c-40ed-b195-a197c397eaa0" />
 
 ---
