@@ -187,10 +187,30 @@ script:
       # Keep the generation dropdown in step with what is actually on disk
       - variables:
           found: "{{ state_attr('sensor.config_restore_browser', 'generations') }}"
+          previous_generation: "{{ states('input_select.restore_generation') }}"
       - if:
           - condition: template
             value_template: "{{ found is iterable and found | count > 0 }}"
         then:
+          # First retain the current selection while installing the new list.
+          - action: input_select.set_options
+            target:
+              entity_id: input_select.restore_generation
+            data:
+              options: >-
+                {{ ([previous_generation] + found) | unique | list }}
+
+          # Preserve a valid selection; otherwise fall back to Latest.
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.restore_generation
+            data:
+              option: >-
+                {{ previous_generation
+                   if previous_generation in found
+                   else found[0] }}
+
+          # Now remove Loading… or an expired generation safely.
           - action: input_select.set_options
             target:
               entity_id: input_select.restore_generation
