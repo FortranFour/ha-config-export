@@ -30,7 +30,8 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 
 <img width="522" height="407" alt="Screenshot 2026-08-30 173821" src="https://github.com/user-attachments/assets/c499c53a-7225-419a-86cb-78e1d9dfcfa6" />
 
-<img width="520" height="1225" alt="Screenshot 2026-08-30 173857" src="https://github.com/user-attachments/assets/fda75e0b-ae4a-4330-9aa7-4aa10f478618" />
+<img width="517" height="1166" alt="Screenshot 2026-08-30 191047" src="https://github.com/user-attachments/assets/356a8bcf-f9a0-4667-bb0a-f27f0a792181" />
+
 
 
 
@@ -47,9 +48,10 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 
 <img width="1210" height="572" alt="Screenshot 2026-08-30 173617" src="https://github.com/user-attachments/assets/efa9ed2a-1cf0-4dd7-9ece-bbc8744189b8" />
 
-<img width="517" height="467" alt="Screenshot 2026-08-30 174135" src="https://github.com/user-attachments/assets/ebe3f646-9188-4e1c-b5fd-1f9ec2dc6c46" />
+<img width="515" height="486" alt="Screenshot 2026-08-30 191338" src="https://github.com/user-attachments/assets/7d516db9-39c5-4e5f-ab27-d82a271f0b80" />
 
-<img width="515" height="1571" alt="Screenshot 2026-08-30 174257" src="https://github.com/user-attachments/assets/df59ff22-f102-4416-a917-a163e0328e65" />
+<img width="515" height="1651" alt="Screenshot 2026-08-30 191447" src="https://github.com/user-attachments/assets/2efe8aa6-432a-4c63-9c16-7ae6e969256f" />
+
 
 
 **Privacy** *(all optional, all off by default)*
