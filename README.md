@@ -46,8 +46,6 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 - A persistent queue that survives paging, filter changes and Home Assistant restarts
 - Every overwritten file is copied to a timestamped rollback folder first
 
-<img width="1210" height="572" alt="Screenshot 2026-08-30 173617" src="https://github.com/user-attachments/assets/efa9ed2a-1cf0-4dd7-9ece-bbc8744189b8" />
-
 <img width="515" height="486" alt="Screenshot 2026-08-30 191338" src="https://github.com/user-attachments/assets/7d516db9-39c5-4e5f-ab27-d82a271f0b80" />
 
 <img width="515" height="1651" alt="Screenshot 2026-08-30 191447" src="https://github.com/user-attachments/assets/2efe8aa6-432a-4c63-9c16-7ae6e969256f" />
@@ -63,6 +61,43 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 - Restore decrypts and un-redacts transparently
 
 Typical export: ~190 files, ~120 converted to YAML, ~4 MB compressed, about 12 seconds.
+
+---
+
+## Browsing the backups from your desktop
+
+The export writes to a Samba share, so the whole history is a network drive away — no
+extracting, no Home Assistant, no tooling. Map `\\homeassistant\share` on Windows,
+`smb://homeassistant/share` on macOS or Linux, and open `ha_config_backup/` in whatever you
+already use.
+
+<img width="1210" height="572" alt="Screenshot 2026-08-30 173617" src="https://github.com/user-attachments/assets/efa9ed2a-1cf0-4dd7-9ece-bbc8744189b8" />
+
+**`latest/` is an uncompressed mirror of the newest export.** Open it directly: search across
+every package with your editor's project-wide find, diff a file against what is live, or copy
+a fragment out of a dashboard. This is the folder most people end up using day to day, and it
+is why the export is not archives-only.
+
+**`latest/yaml/` holds the converted `.storage`.** Everything Home Assistant keeps as opaque
+JSON — helpers, the entity and device registries, energy config, exposed entities — as
+readable YAML. Your UI dashboards are extracted here too, one file each, in the format a
+YAML-mode dashboard expects. Copy a card definition out of it and paste it into the raw
+configuration editor.
+
+**Diffing two generations needs no extraction.** Every archive contains a `MANIFEST.txt` with
+a SHA-256 and size per file. Diff two manifests and the rows that differ are exactly the files
+that changed between those dates — a fast answer to "what did I touch in August?" across ~190
+files.
+
+**The card links straight into the folders.** The Daily / Weekly / Monthly / Yearly buttons on
+the export card open `file://` links to each tier. Browsers block those by default; one policy
+per platform re-enables them, in [docs/BROWSER_LINKS.md](docs/BROWSER_LINKS.md). If you would
+rather not change a browser default, the card prints the path as selectable text instead.
+
+One trade-off worth knowing before you enable it: **encryption removes the `latest/` mirror**,
+because an uncompressed copy of the same content sitting beside an encrypted archive is not
+encrypted. Browsing then happens through the restore card, which reads encrypted archives
+directly, rather than from your file manager.
 
 ---
 
