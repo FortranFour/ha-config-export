@@ -28,6 +28,12 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 - Keeps an uncompressed `latest/` mirror for browsing and diffing without extracting
 - Writes a `MANIFEST.txt` with SHA-256 per file
 
+<img width="522" height="407" alt="Screenshot 2026-08-30 173821" src="https://github.com/user-attachments/assets/c499c53a-7225-419a-86cb-78e1d9dfcfa6" />
+
+<img width="520" height="1225" alt="Screenshot 2026-08-30 173857" src="https://github.com/user-attachments/assets/fda75e0b-ae4a-4330-9aa7-4aa10f478618" />
+
+
+
 **Restore**
 
 - Browse any generation — the `latest/` mirror or any archive, read straight from the
@@ -38,6 +44,13 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
   a path with wildcards
 - A persistent queue that survives paging, filter changes and Home Assistant restarts
 - Every overwritten file is copied to a timestamped rollback folder first
+
+<img width="1210" height="572" alt="Screenshot 2026-08-30 173617" src="https://github.com/user-attachments/assets/efa9ed2a-1cf0-4dd7-9ece-bbc8744189b8" />
+
+<img width="517" height="467" alt="Screenshot 2026-08-30 174135" src="https://github.com/user-attachments/assets/ebe3f646-9188-4e1c-b5fd-1f9ec2dc6c46" />
+
+<img width="515" height="1571" alt="Screenshot 2026-08-30 174257" src="https://github.com/user-attachments/assets/df59ff22-f102-4416-a917-a163e0328e65" />
+
 
 **Privacy** *(all optional, all off by default)*
 
