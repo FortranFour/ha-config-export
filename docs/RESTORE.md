@@ -109,6 +109,17 @@ cp /share/ha_config_backup/_restore_rollback/2026-08-18_235011/config/configurat
 ha core restart
 ```
 
+## Encrypted and redacted generations
+
+Encrypted archives show a padlock in the generation picker and are decrypted in memory using
+the passphrase from `/share/ha_config_backup/.passphrase`. Nothing is written to the share in
+plaintext.
+
+If a generation was redacted and its sidecar still exists, restore puts the original values
+back automatically. Pass `--no-unredact` to leave the tokens in place instead. If the sidecar
+is missing, the restored file keeps its `__CE_REDACTED_nnnn__` placeholders — which is worth
+knowing before you restore a redacted `secrets.yaml` over a working one.
+
 ## Command line
 
 Both scripts run standalone:

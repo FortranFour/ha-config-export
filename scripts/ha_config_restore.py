@@ -24,7 +24,7 @@ Modes
   --queue-remove-all             Empty the queue
   --queue-list                   Print the queue as JSON
 
-  --restore-queue [--allow-storage]
+  --restore-queue [--allow-storage] [--unredact]
         Restore everything queued. Every file it overwrites is copied to
         _restore_rollback/<timestamp>/ first.
 
@@ -56,6 +56,8 @@ from datetime import datetime
 from pathlib import Path
 
 BACKUP_ROOT = Path(__file__).resolve().parent
+PASSPHRASE_FILE = BACKUP_ROOT / ".passphrase"
+SIDECAR_DIR = BACKUP_ROOT / "sidecars"
 STATE_FILE = BACKUP_ROOT / "_restore_state.json"
 DIFF_CACHE = BACKUP_ROOT / "_restore_diff_cache.json"
 QUEUE_FILE = BACKUP_ROOT / "_restore_queue.json"
@@ -106,6 +108,85 @@ def resolve_config_dir() -> Path:
 # --------------------------------------------------------------------------
 
 
+def read_passphrase() -> str | None:
+    try:
+        if PASSPHRASE_FILE.is_file():
+            return PASSPHRASE_FILE.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
+    """Reverses ha_config_backup.encrypt_bytes: header, 16-byte salt, Fernet."""
+    import base64
+
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    if not blob.startswith(b"CEENC1"):
+        raise RuntimeError("Not an encrypted export.")
+    salt, payload = blob[6:22], blob[22:]
+    kdf = Scrypt(salt=salt, length=32, n=2 ** 15, r=8, p=1)
+    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    return Fernet(key).decrypt(payload)
+
+
+def load_sidecar(generation_id: str) -> dict[str, dict[str, str]]:
+    """Values removed by redaction, so a redacted file can be restored whole."""
+    stem = Path(generation_id).name
+    for suffix in (".tar.gz", ""):
+        if stem.endswith(".enc"):
+            stem = stem[:-4]
+        if suffix and stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    candidates = [(SIDECAR_DIR / f"{stem}.sidecar.json", False),
+                  (SIDECAR_DIR / f"{stem}.sidecar.json.enc", True)]
+
+    # The latest/ mirror is the same content as the newest archive but carries
+    # no generation name of its own, so fall back to the most recent sidecar.
+    if stem == "latest" and SIDECAR_DIR.is_dir():
+        found = sorted(SIDECAR_DIR.glob("*.sidecar.json*"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if found:
+            candidates.insert(0, (found[0], found[0].name.endswith(".enc")))
+
+    for path, encrypted in candidates:
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        if encrypted:
+            passphrase = read_passphrase()
+            if not passphrase:
+                raise RuntimeError(
+                    f"{path.name} is encrypted but no passphrase was found in "
+                    f"{PASSPHRASE_FILE}."
+                )
+            raw = decrypt_bytes(raw, passphrase)
+        return json.loads(raw.decode("utf-8")).get("entries", {})
+    return {}
+
+
+def unredact(data: bytes, rel: str, sidecar: dict[str, dict[str, str]]) -> bytes:
+    """Put the original values back before writing the file out."""
+    entries = sidecar.get(rel)
+    if not entries:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    for token, original in entries.items():
+        # A dict entry means the original was a bare JSON scalar — a number or
+        # boolean — so the surrounding quotes have to go with the token.
+        if isinstance(original, dict) and original.get("raw"):
+            text = text.replace(f'"{token}"', original["value"])
+            text = text.replace(token, original["value"])
+            continue
+        text = text.replace(token, original)
+    return text.encode("utf-8")
+
+
 def list_generations() -> list[dict]:
     out = []
     latest = BACKUP_ROOT / "latest"
@@ -117,9 +198,15 @@ def list_generations() -> list[dict]:
         tier_dir = BACKUP_ROOT / tier
         if not tier_dir.is_dir():
             continue
-        for path in sorted(tier_dir.glob("ha-config-*.tar.gz"), reverse=True):
-            tag = path.name.replace("ha-config-", "").replace(".tar.gz", "")
-            out.append({"id": f"{tier}/{path.name}", "label": f"{tier.title()} · {tag}"})
+        found = list(tier_dir.glob("ha-config-*.tar.gz")) + \
+            list(tier_dir.glob("ha-config-*.tar.gz.enc"))
+        for path in sorted(found, reverse=True):
+            tag = (path.name.replace("ha-config-", "")
+                   .replace(".tar.gz.enc", "").replace(".tar.gz", ""))
+            label = f"{tier.title()} · {tag}"
+            if path.name.endswith(".enc"):
+                label += " 🔒"
+            out.append({"id": f"{tier}/{path.name}", "label": label})
     return out
 
 
@@ -140,7 +227,21 @@ class Generation:
             path = BACKUP_ROOT / ident
             if not path.is_file():
                 raise RuntimeError(f"Generation not found: {ident}")
-            self.tar = tarfile.open(path, "r:gz")
+            if path.name.endswith(".enc"):
+                # Decrypt to memory, never to disk: a plaintext copy sitting in
+                # the share would undo the point of encrypting.
+                passphrase = read_passphrase()
+                if not passphrase:
+                    raise RuntimeError(
+                        f"{path.name} is encrypted but no passphrase was found in "
+                        f"{PASSPHRASE_FILE}."
+                    )
+                import io
+                buf = io.BytesIO(decrypt_bytes(path.read_bytes(), passphrase))
+                self.tar = tarfile.open(fileobj=buf, mode="r:gz")
+                self._buf = buf
+            else:
+                self.tar = tarfile.open(path, "r:gz")
             # The archive wraps everything in a single top-level directory. Its
             # first member may be that directory itself, with no trailing
             # slash, so take the first path component rather than looking for
@@ -596,7 +697,7 @@ def queue_path(raw: str, generation: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-def restore_queue(allow_storage: bool) -> dict:
+def restore_queue(allow_storage: bool, put_back_secrets: bool = True) -> dict:
     queue = read_queue()
     if not queue:
         return {"status": "empty", "restored": 0, "message": "Queue is empty."}
@@ -619,6 +720,13 @@ def restore_queue(allow_storage: bool) -> dict:
             errors.append(f"{ident}: {err}")
             continue
 
+        sidecar = {}
+        if put_back_secrets:
+            try:
+                sidecar = load_sidecar(ident)
+            except Exception as err:
+                errors.append(f"sidecar for {ident}: {err}")
+
         with gen:
             for name in names:
                 if name.startswith("storage/") and not allow_storage:
@@ -626,6 +734,8 @@ def restore_queue(allow_storage: bool) -> dict:
                     continue
                 try:
                     data = gen.read(name)
+                    if sidecar:
+                        data = unredact(data, name, sidecar)
                     target = target_for(name, config_dir)
 
                     if target.exists():
@@ -682,6 +792,8 @@ def main() -> int:
     parser.add_argument("--queue-list", action="store_true")
     parser.add_argument("--restore-queue", action="store_true")
     parser.add_argument("--allow-storage", action="store_true")
+    parser.add_argument("--no-unredact", action="store_true",
+                        help="restore redacted placeholders as-is")
     args = parser.parse_args()
 
     if args.generations:
@@ -701,7 +813,7 @@ def main() -> int:
     elif args.queue_list:
         print(json.dumps(read_queue()))
     elif args.restore_queue:
-        print(json.dumps(restore_queue(args.allow_storage)))
+        print(json.dumps(restore_queue(args.allow_storage, not args.no_unredact)))
     else:
         parser.print_help()
         return 1

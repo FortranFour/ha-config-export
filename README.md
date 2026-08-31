@@ -2,7 +2,7 @@
 
 Generational backups of every user-configurable Home Assistant YAML **and JSON** file, with
 the UI-managed JSON in `.storage` converted to readable YAML — plus selective, file-by-file
-restore from any generation.
+restore, optional redaction, and optional encryption.
 
 Home Assistant's built-in backups restore a whole instance well. They are less good at
 answering the question this exists for:
@@ -34,33 +34,33 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
   `.tar.gz`
 - Every candidate is hashed against the live file, so by default you only see what actually
   differs
-- Pick files from a paged, sortable, searchable list, or type a path with wildcards
+- Pick files from a paged list with **search** and sortable **Name / Size** columns, or type
+  a path with wildcards
 - A persistent queue that survives paging, filter changes and Home Assistant restarts
 - Every overwritten file is copied to a timestamped rollback folder first
 
-Typical export here: ~190 files, ~120 converted to YAML, ~4 MB compressed, about 12 seconds.
+**Privacy** *(all optional, all off by default)*
 
----
+- **Redact** credential-shaped values before archiving, to make an export shareable
+- **Sidecar** recording what redaction removed, written *outside* the archive so a redacted
+  backup can still be restored in full
+- **Encrypt** the archive, and optionally the sidecar, with a passphrase
+- Restore decrypts and un-redacts transparently
 
-## Screenshots
-
-<img width="512" height="367" alt="Screenshot 2026-08-22 174840" src="https://github.com/user-attachments/assets/c749e24a-6c39-4a59-8097-2760b29248a5" />
-<img width="511" height="657" alt="Screenshot 2026-08-22 174601" src="https://github.com/user-attachments/assets/91a2015e-b264-4150-9686-6a780df1b92d" />
-<img width="485" height="432" alt="Screenshot 2026-08-22 194926" src="https://github.com/user-attachments/assets/8bf1fad5-2761-451e-8723-bed903dc4a9e" />
-<img width="485" height="1611" alt="Screenshot 2026-08-22 195019" src="https://github.com/user-attachments/assets/c84c80f3-e528-4d13-8419-bae1f0b68866" />
-<img width="1207" height="507" alt="Screenshot 2026-08-22 185634" src="https://github.com/user-attachments/assets/7f44e59d-df7c-40ed-b195-a197c397eaa0" />
+Typical export: ~190 files, ~120 converted to YAML, ~4 MB compressed, about 12 seconds.
 
 ---
 
 ## Requirements
 
 - Home Assistant OS or Supervised
-- The **Samba share** add-on (or any writable path the Core container can see)
+- The **Samba share** add-on, or any writable path the Core container can see
 - `packages: !include_dir_named packages` in your `configuration.yaml`
 - HACS frontend cards: `stack-in-card`, `mushroom`, `button-card`, `card-mod`
 
 No Python dependencies. The scripts use PyYAML when available — it is, inside the HA Core
-container — and fall back to a built-in emitter otherwise.
+container — and fall back to a built-in emitter otherwise. Encryption uses `cryptography`,
+which also ships with Home Assistant.
 
 ---
 
@@ -83,21 +83,37 @@ See **[docs/INSTALL.md](docs/INSTALL.md)** for the full walkthrough. In short:
 | `scripts/ha_config_restore.py` | The restore engine: browse, compare, queue, restore |
 | `packages/config_yaml_export.yaml` | Entities and schedule for the export |
 | `packages/config_restore.yaml` | Entities for the restore UI |
-| `cards/export_card.yaml` | Status, generation counts, "Back up now" |
+| `cards/export_card.yaml` | Status, generation counts, privacy options, "Back up now" |
 | `cards/restore_card.yaml` | Generation picker, search, file list, restore controls |
+| `extras/decrypt_export.py` | Standalone decryption tool — needs no Home Assistant |
 | `extras/` | Optional Windows scripts: copy to PC, encrypted cloud copy |
-| `docs/` | Install, restore, browser links, off-site copies |
+| `docs/` | Install, restore, privacy, recovery, browser links, off-site copies |
 
 ---
 
 ## Security
 
-> [!WARNING]
-> **Nothing is redacted.** `secrets.yaml`, `.storage/auth*`, API tokens and any credentials
-> stored by your integrations all land in the destination in plaintext. That is what makes
-> the export restore-grade, but the destination folder deserves the same protection as your
-> config directory. Do not point it at anything world-readable, and if you sync it to a
-> cloud provider, encrypt it first — `extras/cloud_offsite_ha_backups.ps1` does that.
+**As shipped, nothing is redacted or encrypted.** `secrets.yaml`, `.storage/auth*`, API
+tokens and any credentials your integrations hold all land in the destination in plaintext.
+That is what makes the export restore-grade, but it means the destination folder deserves the
+same protection as your config directory.
+
+Two optional layers change that, and it is worth being precise about what each one buys:
+
+- **Encryption** is a real boundary. An archive copied to your PC or a cloud provider is
+  unreadable without the passphrase.
+- **Redaction** is best-effort. It matches credential-shaped key names, emails, embedded URL
+  credentials and coordinates, so it will miss a secret stored under an unusual key. It makes
+  an export *shareable*; it does not make it *safe*.
+
+The passphrase is stored in a key file the scripts read, not in a Home Assistant entity —
+entity state lands in `.storage` and the recorder database, both of which this export copies,
+and a key stored inside the backup is not a key. That means the boundary is filesystem
+access: anyone who can read the share can read both the key and the archives.
+
+See **[docs/PRIVACY.md](docs/PRIVACY.md)** before turning either on, and
+**[docs/RECOVERY.md](docs/RECOVERY.md)** for opening an encrypted archive when the server no
+longer exists — with a standalone tool, or with nothing but `openssl` and `tar`.
 
 ---
 

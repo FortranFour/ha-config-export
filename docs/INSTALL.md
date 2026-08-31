@@ -71,6 +71,15 @@ Press **Back up now** and check `\\homeassistant\share\ha_config_backup\latest\`
 The Daily / Weekly / Monthly / Yearly buttons open `file://` links, which browsers block by
 default. See [BROWSER_LINKS.md](BROWSER_LINKS.md).
 
+## Optional: redaction and encryption
+
+Both are off by default. The **Privacy & encryption** section of the export card turns on
+redaction, the sidecar that makes redaction reversible, and encryption of the archive and/or
+the sidecar, and holds the passphrase box.
+
+Read [PRIVACY.md](PRIVACY.md) first — encryption is a real boundary, redaction is not, and the
+passphrase is stored as a key file rather than a prompt.
+
 ## What gets skipped
 
 `custom_components/`, `www/`, `deps/`, the database, logs, `.storage/core.restore_state`,

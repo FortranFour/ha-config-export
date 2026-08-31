@@ -241,6 +241,155 @@ cards:
             - font-size: 11px
             - color: var(--secondary-text-color)
 
+  # --- "Privacy & encryption" fold -------------------------------------------
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+          border-top: 1px solid var(--divider-color);
+          padding-top: 12px !important;
+        }
+    entities:
+      - entity: input_boolean.export_show_privacy
+        name: Privacy & encryption
+        tap_action:
+          action: toggle
+        card_mod:
+          style:
+            hui-generic-entity-row$: |
+              state-badge {
+                display: none !important;
+                width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              :host {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+              }
+              .info {
+                position: relative !important;
+                padding-right: 26px !important;
+                margin-left: 0 !important;
+                margin-inline-start: 0 !important;
+                padding-left: 0 !important;
+                text-indent: 0 !important;
+                font-size: 15px !important;
+                font-weight: 500 !important;
+                line-height: 20px !important;
+                letter-spacing: normal !important;
+                color: var(--primary-text-color) !important;
+              }
+              .info::after {
+                content: "";
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                width: 9px;
+                height: 9px;
+                margin-top: -6px;
+                border-right: 2.8px solid var(--primary-text-color);
+                border-bottom: 2.8px solid var(--primary-text-color);
+                transform: rotate({{ '-135deg' if is_state('input_boolean.export_show_privacy', 'on') else '45deg' }}) translate(-2px, -2px);
+                transition: transform 180ms ease-in-out;
+                pointer-events: none;
+              }
+            .: |
+              :host {
+                position: relative;
+              }
+              ha-entity-toggle,
+              ha-switch,
+              ha-toggle {
+                display: none !important;
+              }
+
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: input_boolean.export_show_privacy
+        state: "on"
+    card:
+      type: entities
+      show_header_toggle: false
+      card_mod:
+        style: |
+          ha-card {
+            box-shadow: none;
+            background: transparent;
+            padding: 0 !important;
+          }
+          #states {
+            padding: 0 16px 4px 16px !important;
+          }
+      entities:
+        - entity: input_boolean.export_redact
+          name: Redact personal info
+          icon: mdi:eraser
+          state_color: true
+        - entity: input_boolean.export_sidecar
+          name: Keep sidecar of redacted values
+          icon: mdi:file-key-outline
+          state_color: true
+        - entity: input_boolean.export_encrypt
+          name: Encrypt the backup
+          icon: mdi:lock
+          state_color: true
+        - entity: input_boolean.export_encrypt_sidecar
+          name: Encrypt the sidecar
+          icon: mdi:file-lock
+          state_color: true
+        # Shows whether a passphrase exists and when it was set — never the
+        # value. Stored passphrases are read from a file the scripts open
+        # directly, so nothing can display one here even if it wanted to.
+        - entity: sensor.config_export_passphrase
+          name: Stored passphrase
+          icon: mdi:key-chain-variant
+          secondary_info: last-changed
+        - type: call-service
+          name: Clear stored passphrase
+          icon: mdi:key-remove
+          action_name: CLEAR
+          service: script.turn_on
+          service_data:
+            entity_id: script.config_export_clear_passphrase
+        - entity: input_boolean.export_show_passphrase
+          name: Show passphrase while typing
+          icon: mdi:eye-outline
+          state_color: true
+        # A helper's mode is fixed at definition, so masked and visible are two
+        # separate boxes and the card shows whichever matches the toggle.
+        - type: conditional
+          conditions:
+            - entity: input_boolean.export_show_passphrase
+              state: "off"
+          row:
+            entity: input_text.export_passphrase
+            name: Passphrase
+            icon: mdi:key-variant
+        - type: conditional
+          conditions:
+            - entity: input_boolean.export_show_passphrase
+              state: "on"
+          row:
+            entity: input_text.export_passphrase_plain
+            name: Passphrase
+            icon: mdi:key-outline
+        - type: call-service
+          name: Save passphrase
+          icon: mdi:content-save-lock
+          action_name: SAVE
+          service: script.turn_on
+          service_data:
+            entity_id: script.config_export_save_passphrase
+
   # --- "Schedule" fold -----------------------------------------------------------
   # A standard toggle row with its switch hidden and a chevron drawn in CSS,
   # rather than a fold-entity-row. Home Assistant renders the row, so its

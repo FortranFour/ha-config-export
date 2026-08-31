@@ -185,6 +185,7 @@ script:
         target:
           entity_id: sensor.config_restore_browser
       # Keep the generation dropdown in step with what is actually on disk
+      # Keep the generation dropdown in step with what is actually on disk
       - variables:
           found: "{{ state_attr('sensor.config_restore_browser', 'generations') }}"
           previous_generation: "{{ states('input_select.restore_generation') }}"
@@ -510,6 +511,22 @@ automation:
             value_template: >-
               {{ state_attr('sensor.config_restore_browser', 'generations') is not iterable
                  or (state_attr('sensor.config_restore_browser', 'generations') | count) == 0 }}
+    actions:
+      - delay: "00:00:05"
+      - action: script.turn_on
+        target:
+          entity_id: script.restore_refresh
+
+  # An export changes which generations exist — and with encryption on it also
+  # removes latest/ — but nothing told the restore card, so its dropdown could
+  # sit stale until someone pressed refresh or changed a selector.
+  - id: config_restore_refresh_after_export
+    alias: Config restore refresh after export
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.config_export_status
+        attribute: generated
     actions:
       - delay: "00:00:05"
       - action: script.turn_on

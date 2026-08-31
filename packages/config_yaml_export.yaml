@@ -7,21 +7,42 @@
 #  /share/ha_config_backup/ so Home Assistant updates cannot touch it.
 #
 #  Entities created:
-#    input_datetime.config_export_time   run time, settable from the card
-#    script.config_export_run_now        "Back up now" button
-#    automation.config_export_daily      the schedule
-#    sensor.config_export_status         status + per-tier generation inventory
+#    input_datetime.config_export_time      run time, settable from the card
+#    input_boolean.export_show_schedule     fold state, Schedule section
+#    input_boolean.export_show_privacy      fold state, Privacy section
+#    input_boolean.export_redact            redact credential-shaped values
+#    input_boolean.export_sidecar           keep the reversal file for redaction
+#    input_boolean.export_encrypt           encrypt the archive
+#    input_boolean.export_encrypt_sidecar   encrypt the sidecar too
+#    input_boolean.export_show_passphrase   unmask the passphrase box
+#    input_text.export_passphrase           masked entry
+#    input_text.export_passphrase_plain     visible entry
+#    script.config_export_save_passphrase   writes it to a file, clears the boxes
+#    script.config_export_clear_passphrase  deletes that file
+#    script.config_export_run_now           the "Back up now" button
+#    automation.config_export_daily         the schedule
+#    sensor.config_export_status            status + per-tier inventory
+#    sensor.config_export_passphrase        whether a passphrase exists, never its value
+#
+#  PASSPHRASE HANDLING
+#  The passphrase is written to /share/ha_config_backup/.passphrase and both
+#  text boxes are cleared immediately. It is never left in an entity: entity
+#  state is written to .storage and the recorder database, both of which this
+#  export copies, and a key stored inside the backup it protects is not a key.
+#  The recorder block below keeps it out of the database on the way through.
+#
+#  Encryption and redaction are both OFF unless ticked on the card. See
+#  docs/PRIVACY.md — encryption is a real boundary, redaction is best-effort.
 #
 # -----------------------------------------------------------------------------
 #  MAKING THE CARD'S FOLDER BUTTONS CLICKABLE (Edge / Chrome, Windows)
 # -----------------------------------------------------------------------------
 #  The Daily / Weekly / Monthly / Yearly buttons on the card point at
 #  file://homeassistant/share/ha_config_backup/<tier>/. Browsers block file://
-#  links opened from an http(s) page by default, so out of the box those
-#  buttons do nothing. One registry policy re-enables them.
+#  links opened from an http(s) page, so out of the box those buttons do
+#  nothing. One registry policy re-enables them.
 #
-#  Run an ELEVATED Command Prompt (Win+X > Terminal (Admin)) and paste the
-#  line for your browser:
+#  Run an ELEVATED Command Prompt and paste the line for your browser:
 #
 #    Edge:
 #      reg add "HKLM\SOFTWARE\Policies\Microsoft\Edge\URLAllowlist" /v 1 /t REG_SZ /d "file:///" /f
@@ -29,34 +50,85 @@
 #    Chrome:
 #      reg add "HKLM\SOFTWARE\Policies\Google\Chrome\URLAllowlist" /v 1 /t REG_SZ /d "file:///" /f
 #
-#  Fully close and reopen the browser (check Task Manager for leftover
-#  processes). Confirm it took at edge://policy or chrome://policy — look for
-#  URLAllowlist with the value file:///.
-#
-#  To undo:
-#      reg delete "HKLM\SOFTWARE\Policies\Microsoft\Edge\URLAllowlist" /v 1 /f
+#  Fully close and reopen the browser, then confirm at edge://policy or
+#  chrome://policy. To undo, swap "add" for "delete" and drop /t and /d.
 #
 #  Notes:
-#    - This whitelists ALL file:// links, not just these. Any page you visit
-#      can then offer clickable links to your local filesystem. Clicking is
-#      still required, but it is a real loosening of a browser default.
-#    - The policy affects the desktop browser only. The Home Assistant
-#      companion app cannot open file:// under any configuration.
-#    - Prefer a drive letter? Map the share to Z: in Explorer, then edit the
-#      four url_path lines in the card to file:///Z:/daily/, file:///Z:/weekly/
-#      and so on. Same policy requirement applies.
-#    - Not comfortable with the policy? Leave it alone. The card prints the
-#      UNC paths as selectable text underneath the table — copy one into
-#      Explorer's address bar and it opens with no changes to your browser.
+#    - This whitelists ALL file:// links, not just these.
+#    - Desktop browsers only; the companion app cannot open file:// at all.
+#    - Prefer a drive letter? Map the share to Z: and use file:///Z:/daily/.
+#    - Not comfortable with it? The card prints the UNC path as selectable
+#      text — paste that into Explorer instead.
 # =============================================================================
 
+# The passphrase entity must never reach the recorder database — see the
+# comment on config_export_set_passphrase below.
+recorder:
+  exclude:
+    entities:
+      - input_text.export_passphrase
+      - input_text.export_passphrase_plain
+
 shell_command:
-  config_yaml_export: "python3 /share/ha_config_backup/ha_config_backup.py"
+  config_yaml_export: >-
+    python3 /share/ha_config_backup/ha_config_backup.py
+    {% if is_state('input_boolean.export_redact', 'on') %}--redact{% endif %}
+    {% if is_state('input_boolean.export_sidecar', 'off') %}--no-sidecar{% endif %}
+    {% if is_state('input_boolean.export_encrypt', 'on') %}--encrypt{% endif %}
+    {% if is_state('input_boolean.export_encrypt_sidecar', 'on') %}--encrypt-sidecar{% endif %}
+
+  # Writes the passphrase to a file the export reads, then the script below
+  # clears the text box. The passphrase is never left in an entity: entity
+  # state lands in .storage and the recorder database, both of which this
+  # very export copies — a key stored inside the backup is not a key.
+  config_export_set_passphrase: >-
+    sh -c 'umask 077; printf "%s" "{{ phrase }}" > /share/ha_config_backup/.passphrase'
+
+  config_export_clear_passphrase: >-
+    sh -c 'rm -f /share/ha_config_backup/.passphrase'
+
   # Diagnostics. Run from Developer Tools > Actions and read the response:
   # it reports the resolved config directory, write access and file counts.
   config_yaml_export_check: "python3 /share/ha_config_backup/ha_config_backup.py --check"
 
+input_text:
+  # Two boxes rather than one: a helper's mode is fixed when it is defined, so
+  # a single field cannot be masked and unmasked at runtime. The card shows
+  # whichever one matches the "Show passphrase" toggle.
+  export_passphrase:
+    name: Backup passphrase
+    icon: mdi:key-variant
+    mode: password
+    max: 128
+  export_passphrase_plain:
+    name: Backup passphrase (visible)
+    icon: mdi:key-variant
+    mode: text
+    max: 128
+
 input_boolean:
+  export_redact:
+    # Best-effort removal of credential-shaped values before archiving. Makes
+    # an export shareable; it is not a security boundary — see the docs.
+    name: Redact personal info
+    icon: mdi:eraser
+  export_sidecar:
+    # Records what redaction removed, OUTSIDE the archive, so a redacted
+    # backup can still be restored in full. On by default.
+    name: Keep sidecar of redacted values
+    icon: mdi:file-key-outline
+  export_encrypt:
+    name: Encrypt the backup
+    icon: mdi:lock
+  export_encrypt_sidecar:
+    name: Encrypt the sidecar
+    icon: mdi:file-lock
+  export_show_passphrase:
+    name: Show passphrase while typing
+    icon: mdi:eye-outline
+  export_show_privacy:
+    name: Show privacy options
+    icon: mdi:shield-lock-outline
   export_show_schedule:
     # Drives the "Schedule" fold on the dashboard card, for both tabs. Purely
     # UI state, so one helper on this server covers both.
@@ -71,6 +143,21 @@ input_datetime:
     has_time: true
 
 command_line:
+  # Reports only whether a passphrase exists and when it was last written —
+  # never the value itself. Reading the passphrase into an entity would put it
+  # in .storage and the recorder database, which is the thing this whole design
+  # avoids.
+  - sensor:
+      name: "Config Export Passphrase"
+      unique_id: config_export_passphrase_state
+      command: >-
+        python3 -c "import json,os,datetime as d;p='/share/ha_config_backup/.passphrase';e=os.path.isfile(p) and os.path.getsize(p)>0;print(json.dumps({'set':e,'changed':d.datetime.fromtimestamp(os.path.getmtime(p)).isoformat(timespec='seconds') if e else None}))"
+      value_template: "{{ '••••••••' if value_json.set else 'Not set' }}"
+      json_attributes:
+        - set
+        - changed
+      scan_interval: 900
+
   - sensor:
       name: "Config Export Status"
       unique_id: config_yaml_export_status
@@ -91,6 +178,75 @@ command_line:
       command_timeout: 30
 
 script:
+  # ---- store the passphrase, then forget it ---------------------------------
+  config_export_save_passphrase:
+    alias: Config export save passphrase
+    icon: mdi:key-variant
+    mode: single
+    sequence:
+      - variables:
+          # Take whichever box the user was actually typing in; fall back to
+          # the other if that one is empty.
+          typed: >-
+            {% set shown = states('input_text.export_passphrase_plain') %}
+            {% set hidden = states('input_text.export_passphrase') %}
+            {% set shown = '' if shown in ['unknown', 'unavailable'] else shown %}
+            {% set hidden = '' if hidden in ['unknown', 'unavailable'] else hidden %}
+            {% if is_state('input_boolean.export_show_passphrase', 'on') %}
+            {{ shown if shown else hidden }}
+            {%- else %}
+            {{ hidden if hidden else shown }}
+            {%- endif %}
+          phrase: "{{ typed | trim }}"
+      - condition: template
+        value_template: "{{ phrase | length > 0 }}"
+      - action: shell_command.config_export_set_passphrase
+        data:
+          phrase: "{{ phrase }}"
+      # Both boxes cleared immediately, so the passphrase does not sit in an
+      # entity, the recorder database, or the next export of .storage.
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.export_passphrase
+        data:
+          value: ""
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.export_passphrase_plain
+        data:
+          value: ""
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.config_export_passphrase
+      - action: persistent_notification.create
+        data:
+          notification_id: config_export_passphrase
+          title: Backup passphrase saved
+          message: >-
+            Stored in /share/ha_config_backup/.passphrase, which the export
+            excludes from its own output. **Write it down somewhere else** — if
+            that file is lost, encrypted archives cannot be opened.
+
+  # ---- remove the stored passphrase -----------------------------------------
+  config_export_clear_passphrase:
+    alias: Config export clear passphrase
+    icon: mdi:key-remove
+    mode: single
+    sequence:
+      - action: shell_command.config_export_clear_passphrase
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.config_export_passphrase
+      - action: persistent_notification.create
+        data:
+          notification_id: config_export_passphrase
+          title: Backup passphrase removed
+          message: >-
+            Encrypted exports will now fail with a message naming the missing
+            file, and existing encrypted archives cannot be opened until a
+            passphrase is set again. If it was the only copy, those archives
+            are unreadable for good.
+
   config_export_run_now:
     alias: Config export run now
     icon: mdi:play-circle-outline

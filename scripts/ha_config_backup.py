@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -123,6 +124,52 @@ SKIP_STORAGE_PREFIXES = ("tmp",)
 MAX_FILE_MB = 25
 
 FILE_PREFIX = "ha-config-"
+
+# --------------------------------------------------------------------------
+# Privacy options. All off by default: the export is restore-grade as shipped.
+# Every one of these can be set from the dashboard card instead of here.
+# --------------------------------------------------------------------------
+
+# Replace credential-shaped values with tokens before archiving.
+REDACT = False
+
+# Write the removed values to a sidecar OUTSIDE the archive, so a redacted
+# archive can be fully restored later. Without it, redaction is one-way.
+WRITE_SIDECAR = True
+
+# Encrypt the archive (and optionally the sidecar) with a passphrase.
+ENCRYPT = False
+ENCRYPT_SIDECAR = False
+
+# The passphrase is read from a file, never from a Home Assistant entity: an
+# entity's value is written to .storage and the recorder database, both of
+# which this script backs up — encrypting a backup with a key stored inside it
+# is no encryption at all.
+PASSPHRASE_FILE = BACKUP_ROOT / ".passphrase"
+
+# Keys whose values are treated as credentials, matched case-insensitively
+# anywhere in a key name.
+SECRET_KEY_HINTS = (
+    "password", "passwd", "token", "api_key", "apikey", "secret", "private_key",
+    "client_secret", "access_token", "refresh_token", "session", "cookie",
+    "credential", "auth", "salt", "hash", "pin", "license",
+)
+
+# Value-shaped things worth removing wherever they appear. Order matters:
+# URL credentials go first, or the email pattern swallows "user:pass@host"
+# and leaves half the credential behind.
+VALUE_PATTERNS = (
+    ("url_credentials", re.compile(r"(?<=//)[^/\s:@]+:[^/\s:@]+(?=@)")),
+    # The TLD must be alphabetic, so "token@10.0.4.109" is not mistaken for an
+    # address once the credential above has been tokenised.
+    ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")),
+)
+
+# JSON keys redacted by exact name rather than by hint — location is personal
+# but "latitude" contains none of the credential words.
+SECRET_KEY_EXACT = ("latitude", "longitude")
+
+TOKEN = "__CE_REDACTED_{:04d}__"
 
 # --------------------------------------------------------------------------
 # Logging
@@ -331,6 +378,9 @@ class Stats:
         self.json_files = 0   # sources that were JSON (and got a YAML twin)
         self.skipped_large = 0
         self.fetched = 0
+        self.redacted_files = 0
+        self.redacted_values = 0
+        self.encrypted = False
         self.errors: list[str] = []
         self.warnings: list[str] = []
         self.bytes = 0
@@ -522,6 +572,157 @@ def write_manifest(snap: Path, config_dir: Path, stats: Stats) -> None:
 
 
 # --------------------------------------------------------------------------
+# Passphrase, encryption
+# --------------------------------------------------------------------------
+
+
+def read_passphrase() -> str | None:
+    """Read the passphrase from its file. Never from an entity — see above."""
+    try:
+        if PASSPHRASE_FILE.is_file():
+            value = PASSPHRASE_FILE.read_text(encoding="utf-8").strip()
+            return value or None
+    except OSError as err:
+        log(f"  could not read passphrase file: {err}")
+    return None
+
+
+def encrypt_bytes(data: bytes, passphrase: str) -> bytes:
+    """scrypt-derived key, Fernet (AES-128-CBC + HMAC). Salt is prepended.
+
+    cryptography ships with Home Assistant, so there is nothing to install.
+    """
+    import base64
+
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    salt = os.urandom(16)
+    kdf = Scrypt(salt=salt, length=32, n=2 ** 15, r=8, p=1)
+    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+    return b"CEENC1" + salt + Fernet(key).encrypt(data)
+
+
+def encrypt_file(path: Path, passphrase: str) -> Path:
+    """Encrypt in place, returning the new .enc path. The plaintext is removed."""
+    target = path.with_suffix(path.suffix + ".enc")
+    target.write_bytes(encrypt_bytes(path.read_bytes(), passphrase))
+    path.unlink()
+    return target
+
+
+# --------------------------------------------------------------------------
+# Redaction
+# --------------------------------------------------------------------------
+
+
+class Redactor:
+    """Replaces credential-shaped values with tokens, remembering the originals.
+
+    This is a best-effort filter for making an export shareable, not a security
+    boundary. It works on key names and value shapes, so it will miss a secret
+    stored under an unusual key. Encryption is what actually protects an export.
+    """
+
+    def __init__(self) -> None:
+        self.entries: dict[str, dict[str, str]] = {}
+        self._counter = 0
+
+    def _token(self, rel: str, original, quoted: bool = True) -> str:
+        """quoted=False records that the original was a bare JSON scalar.
+
+        Coordinates are numbers; putting them back as "47.6062" would leave a
+        string where Home Assistant expects a float.
+        """
+        self._counter += 1
+        token = TOKEN.format(self._counter)
+        entry = str(original) if quoted else {"value": str(original), "raw": True}
+        self.entries.setdefault(rel, {})[token] = entry
+        return token
+
+    def _walk_json(self, node, rel: str):
+        if isinstance(node, dict):
+            out = {}
+            for key, value in node.items():
+                name = str(key).lower()
+                if name in SECRET_KEY_EXACT and isinstance(value, (int, float, str)):
+                    out[key] = self._token(
+                        rel, value, quoted=isinstance(value, str)
+                    )
+                elif isinstance(value, str) and value and any(
+                    hint in name for hint in SECRET_KEY_HINTS
+                ):
+                    out[key] = self._token(rel, value)
+                else:
+                    out[key] = self._walk_json(value, rel)
+            return out
+        if isinstance(node, list):
+            return [self._walk_json(item, rel) for item in node]
+        return node
+
+    def redact_json(self, text: str, rel: str) -> str | None:
+        try:
+            data = json.loads(text)
+        except Exception:
+            return None
+        return json.dumps(self._walk_json(data, rel), indent=2)
+
+    def redact_text(self, text: str, rel: str) -> str:
+        out_lines = []
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                match = re.match(r"^(\s*[\"']?)([\w.-]+)([\"']?\s*:\s*)(.+?)(\s*)$", line)
+                if match and any(h in match.group(2).lower() for h in SECRET_KEY_HINTS):
+                    value = match.group(4).strip()
+                    if value and value not in ("{}", "[]", "null", "~"):
+                        line = (match.group(1) + match.group(2) + match.group(3)
+                                + self._token(rel, value) + match.group(5))
+            for _name, pattern in VALUE_PATTERNS:
+                line = pattern.sub(lambda m: self._token(rel, m.group(0)), line)
+            out_lines.append(line)
+        return "".join(out_lines)
+
+    def apply(self, path: Path, rel: str) -> bool:
+        """Redact one file in place. Returns True if anything changed."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        before = self._counter
+        if path.suffix.lower() == ".json" or text.lstrip()[:1] in ("{", "["):
+            new = self.redact_json(text, rel)
+            if new is None:
+                new = self.redact_text(text, rel)
+        else:
+            new = self.redact_text(text, rel)
+        if self._counter == before:
+            return False
+        path.write_text(new, encoding="utf-8")
+        return True
+
+
+def redact_snapshot(snap: Path, stats: "Stats") -> Redactor:
+    """Redact every verbatim copy in the staged snapshot."""
+    redactor = Redactor()
+    changed = 0
+    for sub in ("config", "storage", "addon_configs", "external"):
+        base = snap / sub
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = f"{sub}/{path.relative_to(base).as_posix()}"
+            if redactor.apply(path, rel):
+                changed += 1
+    stats.redacted_files = changed
+    stats.redacted_values = redactor._counter  # noqa: SLF001
+    log(f"Redacted {redactor._counter} value(s) across {changed} file(s)")
+    return redactor
+
+
+# --------------------------------------------------------------------------
 # Generations
 # --------------------------------------------------------------------------
 
@@ -539,14 +740,33 @@ def suffix() -> str:
     return ".tar.gz" if COMPRESS else ""
 
 
+def existing_for_tag(tier_dir: Path, tag: str) -> list[Path]:
+    """Every file already held for this period, whatever its extension.
+
+    A generation can be .tar.gz, .tar.gz.enc or a plain folder depending on the
+    settings in force when it was written. Matching on the tag rather than the
+    full filename is what stops a run with different settings from leaving a
+    second copy of the same period behind.
+    """
+    if not tier_dir.is_dir():
+        return []
+    stem = f"{FILE_PREFIX}{tag}"
+    return [p for p in tier_dir.iterdir()
+            if p.name == stem or p.name.startswith(f"{stem}.")]
+
+
 def store(snap: Path, dest: Path) -> None:
     """Write the staged snapshot to dest as an archive or a folder."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        if dest.is_dir():
-            shutil.rmtree(dest)
+    # Clear the period, not just this exact filename: switching encryption or
+    # compression on or off changes the extension, and leaving the old file
+    # would give the tier two copies of the same day.
+    tag = dest.name[len(FILE_PREFIX):].split(".")[0]
+    for stale in existing_for_tag(dest.parent, tag):
+        if stale.is_dir():
+            shutil.rmtree(stale)
         else:
-            dest.unlink()
+            stale.unlink()
     if COMPRESS:
         tmp = dest.with_suffix(dest.suffix + ".part")
         with tarfile.open(tmp, "w:gz") as tar:
@@ -701,14 +921,57 @@ def main() -> int:
         stats = build_snapshot(staging, config_dir)
         write_manifest(staging, config_dir, stats)
 
+        passphrase = read_passphrase() if (ENCRYPT or ENCRYPT_SIDECAR) else None
+        if (ENCRYPT or ENCRYPT_SIDECAR) and not passphrase:
+            raise RuntimeError(
+                f"Encryption is on but no passphrase was found in {PASSPHRASE_FILE}. "
+                "Set one from the card, or create that file with the passphrase as "
+                "its only line."
+            )
+
         tags = tier_tags(started)
+
+        redactor = redact_snapshot(staging, stats) if REDACT else None
+
+        if redactor and WRITE_SIDECAR and redactor.entries:
+            # Deliberately outside the archive. A sidecar sitting next to a
+            # redacted backup would reduce redaction to obfuscation — the point
+            # is that the archive can be shared or synced while this file stays
+            # behind or travels separately.
+            sidecar_dir = BACKUP_ROOT / "sidecars"
+            sidecar_dir.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                {"generation": f"{FILE_PREFIX}{tags['daily']}",
+                 "created": started.isoformat(timespec="seconds"),
+                 "entries": redactor.entries}, indent=2).encode("utf-8")
+            sidecar = sidecar_dir / f"{FILE_PREFIX}{tags['daily']}.sidecar.json"
+            if ENCRYPT_SIDECAR:
+                sidecar = sidecar.with_suffix(".json.enc")
+                sidecar.write_bytes(encrypt_bytes(payload, passphrase))
+            else:
+                sidecar.write_bytes(payload)
+            try:
+                os.chmod(sidecar, 0o600)
+            except OSError:
+                pass
+            log(f"Sidecar written: {sidecar.name}"
+                f"{' (encrypted)' if ENCRYPT_SIDECAR else ''}")
+
         daily_dest = BACKUP_ROOT / "daily" / f"{FILE_PREFIX}{tags['daily']}{suffix()}"
         store(staging, daily_dest)
+        if ENCRYPT and daily_dest.is_file():
+            daily_dest = encrypt_file(daily_dest, passphrase)
+            stats.encrypted = True
         log(f"Wrote {daily_dest.relative_to(BACKUP_ROOT)}")
 
+        # Promotions must carry the same extension as the daily they link to,
+        # or an encrypted file ends up named .tar.gz and nothing can open it.
+        ext = suffix() + (".enc" if stats.encrypted else "")
         for tier in ("weekly", "monthly", "yearly"):
-            dest = BACKUP_ROOT / tier / f"{FILE_PREFIX}{tags[tier]}{suffix()}"
-            if dest.exists():
+            dest = BACKUP_ROOT / tier / f"{FILE_PREFIX}{tags[tier]}{ext}"
+            # Held already if any file covers this period, regardless of
+            # extension — otherwise a settings change promotes a duplicate.
+            if existing_for_tag(dest.parent, tags[tier]):
                 continue
             duplicate(daily_dest, dest)
             log(f"Promoted to {tier}/{dest.name}")
@@ -716,7 +979,14 @@ def main() -> int:
         for tier, keep in KEEP.items():
             prune(tier, keep)
 
-        if KEEP_LATEST_MIRROR:
+        if KEEP_LATEST_MIRROR and ENCRYPT:
+            # An encrypted archive beside a plaintext mirror of the same content
+            # is not encrypted. Drop the mirror instead of pretending.
+            latest = BACKUP_ROOT / "latest"
+            if latest.exists():
+                shutil.rmtree(latest, ignore_errors=True)
+            log("Skipped latest/ mirror: encryption is enabled")
+        elif KEEP_LATEST_MIRROR:
             latest = BACKUP_ROOT / "latest"
             tmp_latest = BACKUP_ROOT / ".latest.new"
             if tmp_latest.exists():
@@ -733,7 +1003,10 @@ def main() -> int:
             f"Done in {elapsed:.1f}s — {stats.copied} files "
             f"({stats.yaml_files} YAML, {stats.json_files} JSON, {stats.non_json} other), "
             f"{stats.converted} converted, "
-            f"{stats.fetched} fetched, {len(stats.warnings)} warning(s), "
+            f"{stats.fetched} fetched, "
+            f"{('redacted ' + str(stats.redacted_values) + ' values, ') if REDACT else ''}"
+            f"{'encrypted, ' if stats.encrypted else ''}"
+            f"{len(stats.warnings)} warning(s), "
             f"{len(stats.errors)} problem(s), "
             f"archive {archived / 1024 / 1024:.1f} MiB"
         )
@@ -750,6 +1023,10 @@ def main() -> int:
                     "json_files": stats.json_files,
                     "non_json": stats.non_json,
                     "fetched": stats.fetched,
+                    "redacted_files": stats.redacted_files,
+                    "redacted_values": stats.redacted_values,
+                    "encrypted": stats.encrypted,
+                    "redacted": REDACT,
                     "skipped_large": stats.skipped_large,
                     "warnings": len(stats.warnings),
                     "warning_detail": stats.warnings[:10],
@@ -829,7 +1106,23 @@ def diagnostics() -> str:
     return "\n".join(lines)
 
 
+def apply_cli_options(argv: list[str]) -> None:
+    """Options come from the dashboard card via shell_command flags."""
+    global REDACT, WRITE_SIDECAR, ENCRYPT, ENCRYPT_SIDECAR, PASSPHRASE_FILE
+    if "--redact" in argv:
+        REDACT = True
+    if "--no-sidecar" in argv:
+        WRITE_SIDECAR = False
+    if "--encrypt" in argv:
+        ENCRYPT = True
+    if "--encrypt-sidecar" in argv:
+        ENCRYPT_SIDECAR = True
+    if "--passphrase-file" in argv:
+        PASSPHRASE_FILE = Path(argv[argv.index("--passphrase-file") + 1])
+
+
 if __name__ == "__main__":
+    apply_cli_options(sys.argv)
     if "--check" in sys.argv:
         print(diagnostics())
         sys.exit(0)
