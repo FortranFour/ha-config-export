@@ -45,6 +45,9 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
   a path with wildcards
 - A persistent queue that survives paging, filter changes and Home Assistant restarts
 - Every overwritten file is copied to a timestamped rollback folder first
+- Rollback folders and redaction sidecars are pruned automatically — kept while newer than a
+  year *or* among the twelve most recent — and a **Cleanup** section on the export card clears
+  them sooner, showing what is on disk and what it would remove before you confirm
 
 <img width="515" height="486" alt="Screenshot 2026-08-30 191338" src="https://github.com/user-attachments/assets/7d516db9-39c5-4e5f-ab27-d82a271f0b80" />
 
@@ -133,7 +136,7 @@ See **[docs/INSTALL.md](docs/INSTALL.md)** for the full walkthrough. In short:
 | `scripts/ha_config_restore.py` | The restore engine: browse, compare, queue, restore |
 | `packages/config_yaml_export.yaml` | Entities and schedule for the export |
 | `packages/config_restore.yaml` | Entities for the restore UI |
-| `cards/export_card.yaml` | Status, generation counts, privacy options, "Back up now" |
+| `cards/export_card.yaml` | Status, generation counts, privacy options, cleanup, "Back up now" |
 | `cards/restore_card.yaml` | Generation picker, search, file list, restore controls |
 | `extras/decrypt_export.py` | Standalone decryption tool — needs no Home Assistant |
 | `extras/` | Optional Windows scripts: copy to PC, encrypted cloud copy |
