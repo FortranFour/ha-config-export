@@ -28,11 +28,9 @@ No custom integration, no add-on. Two Python scripts, two YAML packages, two Lov
 - Keeps an uncompressed `latest/` mirror for browsing and diffing without extracting
 - Writes a `MANIFEST.txt` with SHA-256 per file
 
-<img width="522" height="407" alt="Screenshot 2026-08-30 173821" src="https://github.com/user-attachments/assets/c499c53a-7225-419a-86cb-78e1d9dfcfa6" />
+<img width="516" height="497" alt="Screenshot 2026-09-01 141922" src="https://github.com/user-attachments/assets/6b4af5be-69f7-440f-b11e-486e667da265" />
 
-<img width="517" height="1166" alt="Screenshot 2026-08-30 191047" src="https://github.com/user-attachments/assets/356a8bcf-f9a0-4667-bb0a-f27f0a792181" />
-
-
+<img width="516" height="1492" alt="Screenshot 2026-09-01 142020" src="https://github.com/user-attachments/assets/2e37d82f-29e3-403e-9cc5-18694aba9c4b" />
 
 
 **Restore**
