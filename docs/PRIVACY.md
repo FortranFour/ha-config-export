@@ -57,6 +57,10 @@ Which also means: **if you sync the whole backup folder somewhere, sync `sidecar
 separately, or encrypt it.** `sidecars/` next to `daily/` in the same cloud folder undoes the
 point.
 
+Sidecars are pruned on the same rule as rollback folders — kept while newer than a year or
+among the twelve most recent — so they do not accumulate for generations that aged out long
+ago. The **Cleanup** section of the export card clears them sooner if you want the space back.
+
 Restore un-redacts by default. Pass `--no-unredact` to the script if you want the tokens left
 in place.
 
