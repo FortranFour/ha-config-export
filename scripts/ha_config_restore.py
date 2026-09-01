@@ -52,6 +52,7 @@ import re
 import shutil
 import sys
 import tarfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -70,6 +71,14 @@ PAGE_SIZE = 12
 # Hashing a whole generation takes a second or two; reuse the result while the
 # user is paging around, but not so long that edits go unnoticed.
 DIFF_CACHE_SECONDS = 120
+
+# Rollback folders are the safety net for a bad restore, so they are pruned
+# generously: a folder survives while it is EITHER newer than a year OR among
+# the twelve most recent. Only when both fail is it removed.
+KEEP_ROLLBACKS = 12
+KEEP_ROLLBACK_DAYS = 365
+
+MAX_LOG_LINES = 2000
 
 # Restoring these can lock you out or confuse the instance. Flagged in the UI.
 RISKY_PREFIXES = ("auth", "onboarding", "core.uuid", "cloud", "http",
@@ -91,6 +100,43 @@ def log(message: str) -> None:
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {message}"
     with LOG_FILE.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+    # Trim on size rather than on every line: rewriting the file per call would
+    # turn a 40-file restore into 40 full rewrites. The log therefore sits
+    # under ~400 kB, dropping back to MAX_LOG_LINES whenever it crosses that.
+    try:
+        if LOG_FILE.stat().st_size > 400_000:
+            kept = LOG_FILE.read_text(encoding="utf-8").splitlines()[-MAX_LOG_LINES:]
+            LOG_FILE.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def prune_rollbacks() -> int:
+    """Remove rollback folders that are both old and well past the recent ones.
+
+    Kept if newer than KEEP_ROLLBACK_DAYS *or* within the KEEP_ROLLBACKS most
+    recent — whichever reaches further back. A quiet year of restores therefore
+    keeps everything, and a busy week does not evict last month's safety net.
+    """
+    if not ROLLBACK_ROOT.is_dir():
+        return 0
+
+    folders = sorted((p for p in ROLLBACK_ROOT.iterdir() if p.is_dir()),
+                     key=lambda p: p.name, reverse=True)
+    cutoff = time.time() - KEEP_ROLLBACK_DAYS * 86400
+    removed = 0
+    for index, folder in enumerate(folders):
+        if index < KEEP_ROLLBACKS:
+            continue
+        try:
+            if folder.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(folder)
+            removed += 1
+            log(f"pruned old rollback {folder.name}")
+        except OSError as err:
+            log(f"could not prune {folder.name}: {err}")
+    return removed
 
 
 def resolve_config_dir() -> Path:
@@ -754,6 +800,7 @@ def restore_queue(allow_storage: bool, put_back_secrets: bool = True) -> dict:
 
     if restored:
         write_queue([])
+        prune_rollbacks()
 
     result = {
         "status": "error" if errors else ("ok" if restored else "skipped"),

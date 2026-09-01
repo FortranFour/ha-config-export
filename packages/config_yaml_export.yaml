@@ -84,6 +84,12 @@ shell_command:
   config_export_set_passphrase: >-
     sh -c 'umask 077; printf "%s" "{{ phrase }}" > /share/ha_config_backup/.passphrase'
 
+  # Cleanup: reports what is eligible, and clears it on request. "Eligible"
+  # means both older than a year and outside the twelve most recent — the
+  # scripts prune on the same rule automatically, so this is a way to clear
+  # earlier, not the only way it happens.
+  config_export_cleanup: "python3 /share/ha_config_backup/ha_config_backup.py --cleanup"
+
   config_export_clear_passphrase: >-
     sh -c 'rm -f /share/ha_config_backup/.passphrase'
 
@@ -126,6 +132,9 @@ input_boolean:
   export_show_passphrase:
     name: Show passphrase while typing
     icon: mdi:eye-outline
+  export_show_cleanup:
+    name: Show cleanup section
+    icon: mdi:broom
   export_show_privacy:
     name: Show privacy options
     icon: mdi:shield-lock-outline
@@ -157,6 +166,30 @@ command_line:
         - set
         - changed
       scan_interval: 900
+
+  - sensor:
+      name: "Config Export Cleanup"
+      unique_id: config_export_cleanup_state
+      command: "python3 /share/ha_config_backup/ha_config_backup.py --cleanup-report"
+      value_template: "{{ value_json.eligible | int(0) }}"
+      unit_of_measurement: "items"
+      json_attributes:
+        - eligible
+        - eligible_mb
+        - auto_eligible
+        - oldest_kept
+        - rollbacks_total
+        - rollbacks_eligible
+        - rollbacks_mb
+        - sidecars_total
+        - sidecars_eligible
+        - sidecars_mb
+        - keep_recent
+        - keep_days
+        - items
+        - generated
+      scan_interval: 3600
+      command_timeout: 60
 
   - sensor:
       name: "Config Export Status"
@@ -247,6 +280,30 @@ script:
             passphrase is set again. If it was the only copy, those archives
             are unreadable for good.
 
+  # ---- clear old rollbacks and sidecars -------------------------------------
+  config_export_cleanup:
+    alias: Config export cleanup
+    icon: mdi:broom
+    mode: single
+    sequence:
+      - action: shell_command.config_export_cleanup
+        response_variable: cleaned
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.config_export_cleanup
+      - variables:
+          result: "{{ (cleaned.stdout or '{}') | from_json }}"
+      - action: persistent_notification.create
+        data:
+          notification_id: config_export_cleanup
+          title: Cleanup complete
+          message: >-
+            Removed {{ result.removed | default(0) }} item(s),
+            freeing {{ result.freed_mb | default(0) }} MB.
+            {% if result.errors %}
+
+            Errors: {{ result.errors | join(', ') }}{% endif %}
+
   config_export_run_now:
     alias: Config export run now
     icon: mdi:play-circle-outline
@@ -305,6 +362,49 @@ script:
           # ---------------------------------------------------------------
 
 automation:
+  # Tells you once when there is something to clear, rather than silently
+  # deleting or silently accumulating. Cleared automatically when nothing is
+  # eligible, so it does not linger after you act on it.
+  - id: config_export_cleanup_available
+    alias: Config export cleanup available
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.config_export_cleanup
+        above: 0
+        id: something
+      - trigger: numeric_state
+        entity_id: sensor.config_export_cleanup
+        below: 1
+        id: nothing
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: something
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: config_export_cleanup_available
+                  title: Old backup copies can be cleared
+                  message: >-
+                    {{ states('sensor.config_export_cleanup') }} item(s) —
+                    {{ state_attr('sensor.config_export_cleanup', 'eligible_mb') }} MB —
+                    sit outside the
+                    {{ state_attr('sensor.config_export_cleanup', 'keep_recent') }}
+                    most recent and can be cleared under **Cleanup** on the
+                    Configuration Export card.
+
+                    Ignoring this is fine: automatic pruning removes anything both
+                    that old and older than
+                    {{ state_attr('sensor.config_export_cleanup', 'keep_days') }} days
+                    without being asked. Clearing manually just reclaims the space
+                    sooner.
+        default:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: config_export_cleanup_available
+
   - id: config_export_daily
     alias: Config export daily
     description: >-

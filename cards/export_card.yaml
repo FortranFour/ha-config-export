@@ -390,6 +390,167 @@ cards:
           service_data:
             entity_id: script.config_export_save_passphrase
 
+  # --- "Cleanup" fold ---------------------------------------------------------
+  - type: entities
+    show_header_toggle: false
+    card_mod:
+      style: |
+        ha-card {
+          box-shadow: none;
+          background: transparent;
+          padding: 0 !important;
+        }
+        #states {
+          padding: 0 16px 4px 16px !important;
+          border-top: 1px solid var(--divider-color);
+          padding-top: 12px !important;
+        }
+    entities:
+      - entity: input_boolean.export_show_cleanup
+        name: Cleanup
+        tap_action:
+          action: toggle
+        card_mod:
+          style:
+            hui-generic-entity-row$: |
+              state-badge {
+                display: none !important;
+                width: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              :host {
+                padding-left: 0 !important;
+                margin-left: 0 !important;
+              }
+              .info {
+                position: relative !important;
+                padding-right: 26px !important;
+                margin-left: 0 !important;
+                margin-inline-start: 0 !important;
+                padding-left: 0 !important;
+                text-indent: 0 !important;
+                font-size: 15px !important;
+                font-weight: 500 !important;
+                line-height: 20px !important;
+                letter-spacing: normal !important;
+                color: var(--primary-text-color) !important;
+              }
+              .info::after {
+                content: "";
+                position: absolute;
+                right: 12px;
+                top: 50%;
+                width: 9px;
+                height: 9px;
+                margin-top: -6px;
+                border-right: 2.8px solid var(--primary-text-color);
+                border-bottom: 2.8px solid var(--primary-text-color);
+                transform: rotate({{ '-135deg' if is_state('input_boolean.export_show_cleanup', 'on') else '45deg' }}) translate(-2px, -2px);
+                transition: transform 180ms ease-in-out;
+                pointer-events: none;
+              }
+            .: |
+              :host {
+                position: relative;
+              }
+              ha-entity-toggle,
+              ha-switch,
+              ha-toggle {
+                display: none !important;
+              }
+
+  - type: conditional
+    conditions:
+      - condition: state
+        entity: input_boolean.export_show_cleanup
+        state: "on"
+    card:
+      type: custom:stack-in-card
+      mode: vertical
+      cards:
+        - type: markdown
+          card_mod:
+            style:
+              .: |
+                ha-card {
+                  box-shadow: none;
+                  background: transparent;
+                  padding: 0 !important;
+                }
+                ha-markdown {
+                  padding: 0 16px 4px 16px !important;
+                }
+              ha-markdown$: |
+                table {
+                  width: 100%;
+                  border-collapse: collapse;
+                  font-size: 13px;
+                }
+                td, th {
+                  padding: 4px 6px;
+                  text-align: left;
+                }
+                th {
+                  border-bottom: 1px solid var(--divider-color);
+                  font-weight: 500;
+                }
+                th:nth-child(2), th:nth-child(3),
+                td:nth-child(2), td:nth-child(3) {
+                  text-align: right;
+                  white-space: nowrap;
+                }
+                p {
+                  font-size: 12px;
+                  opacity: 0.8;
+                  margin: 8px 0 0 0;
+                }
+          content: >
+            {% set c = 'sensor.config_export_cleanup' %}
+
+            | Kind | On disk | Clearable |
+
+            |:--|--:|--:|
+
+            | Rollbacks | {{ state_attr(c, 'rollbacks_total') | int(0) }} ·
+            {{ state_attr(c, 'rollbacks_mb') | float(0) | round(1) }} MB |
+            {{ state_attr(c, 'rollbacks_eligible') | int(0) }} |
+
+            | Sidecars | {{ state_attr(c, 'sidecars_total') | int(0) }} ·
+            {{ state_attr(c, 'sidecars_mb') | float(0) | round(1) }} MB |
+            {{ state_attr(c, 'sidecars_eligible') | int(0) }} |
+
+            <p>Clearable keeps the {{ state_attr(c, 'keep_recent') | int(12) }} most
+            recent of each and offers the rest, whatever their age. Automatic pruning is
+            stricter — it only removes what is <em>also</em> older than
+            {{ state_attr(c, 'keep_days') | int(365) }} days, and would currently take
+            {{ state_attr(c, 'auto_eligible') | int(0) }}. So this button reclaims space now;
+            leaving it alone still bounds the folder eventually.</p>
+
+        - type: custom:mushroom-template-card
+          primary: >-
+            {% set n = states('sensor.config_export_cleanup') | int(0) %}
+            {{ 'Clear ' ~ n ~ ' old item' ~ ('' if n == 1 else 's') if n > 0
+               else 'Nothing to clear' }}
+          secondary: >-
+            {% set n = states('sensor.config_export_cleanup') | int(0) %}
+            {% if n > 0 %}Frees about
+            {{ state_attr('sensor.config_export_cleanup', 'eligible_mb') }} MB
+            {% else %}Everything on disk is still within the keep rule{% endif %}
+          icon: mdi:broom
+          icon_color: >-
+            {{ 'orange' if (states('sensor.config_export_cleanup') | int(0)) > 0
+               else 'grey' }}
+          tap_action:
+            action: perform-action
+            perform_action: script.turn_on
+            target:
+              entity_id: script.config_export_cleanup
+            confirmation:
+              text: >-
+                Delete the listed rollback folders and sidecars? Rollbacks are the
+                only copy of files replaced by a restore.
+
   # --- "Schedule" fold -----------------------------------------------------------
   # A standard toggle row with its switch hidden and a chevron drawn in CSS,
   # rather than a fold-entity-row. Home Assistant renders the row, so its

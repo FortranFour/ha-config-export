@@ -52,6 +52,7 @@ import re
 import shutil
 import sys
 import tarfile
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -66,6 +67,19 @@ _env_root = os.environ.get("HA_YAML_BACKUP_ROOT")
 BACKUP_ROOT = Path(_env_root) if _env_root else Path(__file__).resolve().parent
 
 KEEP = {"daily": 7, "weekly": 4, "monthly": 12, "yearly": 5}
+
+# Sidecars are the only thing that would otherwise grow without limit: one per
+# redacted generation, and they outlive the generation they belong to. Same
+# rule as the restore rollbacks — kept while EITHER newer than a year OR among
+# the twelve most recent.
+KEEP_SIDECARS = 12
+KEEP_SIDECAR_DAYS = 365
+
+# Rollback folders are written by ha_config_restore.py, which prunes them on
+# the same rule. These constants exist so the export can report and clear them
+# from the dashboard; keep the two files in step if you change them.
+KEEP_ROLLBACKS = 12
+KEEP_ROLLBACK_DAYS = 365
 
 # tar.gz keeps 28 generations small; set False to store plain folders instead.
 COMPRESS = True
@@ -740,6 +754,151 @@ def suffix() -> str:
     return ".tar.gz" if COMPRESS else ""
 
 
+def prunable(items: list[Path], keep_n: int, keep_days: int | None) -> list[Path]:
+    """Items beyond the newest keep_n, and older than keep_days if given.
+
+    Two callers with deliberately different appetites:
+
+      * automatic pruning passes keep_days, so an item has to fail BOTH tests.
+        Conservative, because it happens without anyone watching.
+      * the dashboard's Clear button passes None, so only the count applies.
+        That makes manual clearing strictly more aggressive than automatic —
+        otherwise the button would only ever do what the next run would have
+        done anyway, which is no reason to have a button.
+
+    Newest first by name, which is chronological given the date-stamped naming.
+    """
+    ordered = sorted(items, key=lambda p: p.name, reverse=True)
+    cutoff = None if keep_days is None else time.time() - keep_days * 86400
+    out = []
+    for index, path in enumerate(ordered):
+        if index < keep_n:
+            continue
+        if cutoff is None:
+            out.append(path)
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                out.append(path)
+        except OSError:
+            pass
+    return out
+
+
+def dir_size(path: Path) -> int:
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def cleanup_candidates() -> dict:
+    """What could be deleted right now, without deleting anything."""
+    rollback_root = BACKUP_ROOT / "_restore_rollback"
+    sidecar_dir = BACKUP_ROOT / "sidecars"
+
+    rollbacks = [p for p in rollback_root.iterdir() if p.is_dir()] \
+        if rollback_root.is_dir() else []
+    sidecars = [p for p in sidecar_dir.glob("*.sidecar.json*") if p.is_file()] \
+        if sidecar_dir.is_dir() else []
+
+    # What the Clear button would remove: everything past the newest N.
+    old_rollbacks = prunable(rollbacks, KEEP_ROLLBACKS, None)
+    old_sidecars = prunable(sidecars, KEEP_SIDECARS, None)
+
+    # What automatic pruning will remove on its own, without being asked.
+    auto = (len(prunable(rollbacks, KEEP_ROLLBACKS, KEEP_ROLLBACK_DAYS))
+            + len(prunable(sidecars, KEEP_SIDECARS, KEEP_SIDECAR_DAYS)))
+
+    items = []
+    for path in old_rollbacks + old_sidecars:
+        items.append({
+            "name": path.name,
+            "kind": "rollback" if path in old_rollbacks else "sidecar",
+            "mb": round(dir_size(path) / 1048576, 2),
+            "age_days": int((time.time() - path.stat().st_mtime) / 86400),
+        })
+    items.sort(key=lambda i: i["name"])
+
+    return {
+        "eligible": len(items),
+        "eligible_mb": round(sum(i["mb"] for i in items), 2),
+        "auto_eligible": auto,
+        "rollbacks_total": len(rollbacks),
+        "rollbacks_eligible": len(old_rollbacks),
+        "rollbacks_mb": round(sum(dir_size(p) for p in rollbacks) / 1048576, 2),
+        "sidecars_total": len(sidecars),
+        "sidecars_eligible": len(old_sidecars),
+        "sidecars_mb": round(sum(dir_size(p) for p in sidecars) / 1048576, 2),
+        "keep_recent": KEEP_ROLLBACKS,
+        "keep_days": KEEP_ROLLBACK_DAYS,
+        "oldest_kept": min((p.name for p in
+                            sorted(rollbacks, key=lambda p: p.name,
+                                   reverse=True)[:KEEP_ROLLBACKS]), default=None),
+        "items": items[:40],
+        "generated": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def run_cleanup() -> dict:
+    """Delete everything cleanup_candidates() lists. Nothing else is touched."""
+    report = cleanup_candidates()
+    removed, freed, errors = 0, 0.0, []
+
+    rollback_root = BACKUP_ROOT / "_restore_rollback"
+    sidecar_dir = BACKUP_ROOT / "sidecars"
+    for item in report["items"]:
+        base = rollback_root if item["kind"] == "rollback" else sidecar_dir
+        path = base / item["name"]
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed += 1
+            freed += item["mb"]
+            log(f"  cleanup removed {item['kind']} {item['name']}")
+        except OSError as err:
+            errors.append(f"{item['name']}: {err}")
+
+    result = {"removed": removed, "freed_mb": round(freed, 2), "errors": errors[:10]}
+    log(f"Cleanup: removed {removed} item(s), freed {result['freed_mb']} MB")
+    return result
+
+
+def prune_sidecars() -> int:
+    """Trim the sidecar folder. See KEEP_SIDECARS for the rule."""
+    sidecar_dir = BACKUP_ROOT / "sidecars"
+    if not sidecar_dir.is_dir():
+        return 0
+
+    files = sorted((p for p in sidecar_dir.glob("*.sidecar.json*") if p.is_file()),
+                   key=lambda p: p.name, reverse=True)
+    cutoff = time.time() - KEEP_SIDECAR_DAYS * 86400
+    removed = 0
+    for index, path in enumerate(files):
+        if index < KEEP_SIDECARS:
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            path.unlink()
+            removed += 1
+            log(f"  pruned old sidecar {path.name}")
+        except OSError as err:
+            log(f"  could not prune {path.name}: {err}")
+    return removed
+
+
 def existing_for_tag(tier_dir: Path, tag: str) -> list[Path]:
     """Every file already held for this period, whatever its extension.
 
@@ -956,6 +1115,7 @@ def main() -> int:
                 pass
             log(f"Sidecar written: {sidecar.name}"
                 f"{' (encrypted)' if ENCRYPT_SIDECAR else ''}")
+            prune_sidecars()
 
         daily_dest = BACKUP_ROOT / "daily" / f"{FILE_PREFIX}{tags['daily']}{suffix()}"
         store(staging, daily_dest)
@@ -1123,6 +1283,12 @@ def apply_cli_options(argv: list[str]) -> None:
 
 if __name__ == "__main__":
     apply_cli_options(sys.argv)
+    if "--cleanup-report" in sys.argv:
+        print(json.dumps(cleanup_candidates()))
+        raise SystemExit(0)
+    if "--cleanup" in sys.argv:
+        print(json.dumps(run_cleanup()))
+        raise SystemExit(0)
     if "--check" in sys.argv:
         print(diagnostics())
         sys.exit(0)

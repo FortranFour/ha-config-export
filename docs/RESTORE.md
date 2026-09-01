@@ -95,8 +95,13 @@ storage JSON itself, which is the supported path and surgical rather than wholes
 **Old generations may predate an integration.** Restoring a two-month-old
 `core.config_entries` removes anything added since.
 
-**Rollbacks accumulate.** Each restore makes a new timestamped folder under
-`_restore_rollback/`. Nothing prunes them.
+**Rollbacks are pruned, but generously.** Each restore makes a new timestamped folder under
+`_restore_rollback/`. A folder is kept while it is *either* newer than a year *or* among the
+twelve most recent — so a quiet year keeps everything, and a busy week of restores does not
+evict last month's safety net. Only when both tests fail is a folder removed. Adjust
+`KEEP_ROLLBACKS` and `KEEP_ROLLBACK_DAYS` at the top of `ha_config_restore.py`.
+
+Sidecars follow the same rule, since they outlive the generation they belong to.
 
 ## If a restore makes things worse
 
