@@ -222,9 +222,50 @@ def flush_log() -> None:
 try:
     import yaml  # type: ignore
 
+    # YAML parsers disagree about bare y and n: some read them as booleans,
+    # some as ordinary strings. PyYAML treats them as strings and so leaves
+    # them unquoted, but a parser that disagrees turns an unquoted "y:" key
+    # into "true:" — quietly renaming the key and dropping whatever read it.
+    # Any config using x/y/z coordinates is affected. Quoting them here keeps
+    # the output safe whichever parser reads it back.
+    AMBIGUOUS_BOOLS = {"y", "n"}
+
+    class _HADumper(yaml.SafeDumper):
+        """SafeDumper that quotes tokens other YAML parsers may misread."""
+
+    def _literal_safe(text: str) -> bool:
+        """True when a literal | block reproduces this string exactly.
+
+        A literal block cannot carry trailing whitespace on a line (the parser
+        strips it), cannot represent a carriage return, and needs a plain final
+        newline or none at all. In those cases we fall back to the quoted form
+        PyYAML would have chosen — ugly, but ugly beats altered.
+        """
+        if "\n" not in text or "\r" in text or "\x1b" in text:
+            return False
+        lines = text.split("\n")
+        if any(line != line.rstrip() for line in lines):
+            return False
+        # A leading blank line or leading indent needs an explicit indicator,
+        # which PyYAML handles, but keep it simple and skip those.
+        return bool(lines[0]) and not lines[0].startswith((" ", "\t"))
+
+    def _represent_str(dumper, data):
+        if data.lower() in AMBIGUOUS_BOOLS:
+            return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
+        if _literal_safe(data):
+            # Multi-line values — card_mod CSS, Jinja templates, button-card JS
+            # — as readable | blocks instead of escaped one-liners, so a diff
+            # shows the line that changed rather than the whole string.
+            return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+    _HADumper.add_representer(str, _represent_str)
+
     def to_yaml(obj) -> str:
-        return yaml.safe_dump(
+        return yaml.dump(
             obj,
+            Dumper=_HADumper,
             sort_keys=False,
             allow_unicode=True,
             default_flow_style=False,
