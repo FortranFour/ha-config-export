@@ -167,13 +167,30 @@ SECRET_KEY_HINTS = (
     "password", "passwd", "token", "api_key", "apikey", "secret", "private_key",
     "client_secret", "access_token", "refresh_token", "session", "cookie",
     "credential", "auth", "salt", "hash", "pin", "license",
+    "webhook", "cloudhook", "jwt", "psk", "passcode", "bearer", "access_key",
+    "encryption_key", "signing_key",
 )
+
+# Key names too generic to redact on sight — "key" is in every .storage
+# wrapper — but which hold a secret when the value is secret-shaped. ESPHome's
+# api: encryption: key: is the case that motivated this.
+SECRET_KEY_IF_SHAPED = ("key", "ota", "encryption")
+SECRET_SHAPE = re.compile(r"^[A-Za-z0-9+/=_\-]{20,}$")
 
 # Value-shaped things worth removing wherever they appear. Order matters:
 # URL credentials go first, or the email pattern swallows "user:pass@host"
 # and leaves half the credential behind.
 VALUE_PATTERNS = (
     ("url_credentials", re.compile(r"(?<=//)[^/\s:@]+:[^/\s:@]+(?=@)")),
+    # Provider tokens identifiable from their prefix alone, so they are caught
+    # whatever key they sit under — or inside a string with no key at all.
+    ("openai_key", re.compile(r"sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{20,}")),
+    ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
+    ("github_token", re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}")),
+    ("google_key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("slack_token", re.compile(r"xox[abprs]-[A-Za-z0-9\-]{10,}")),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
+    ("nabu_casa_hook", re.compile(r"(?<=hooks\.nabu\.casa/)[A-Za-z0-9_\-]{10,}")),
     # The TLD must be alphabetic, so "token@10.0.4.109" is not mistaken for an
     # address once the credential above has been tokenised.
     ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")),
@@ -184,6 +201,10 @@ VALUE_PATTERNS = (
 SECRET_KEY_EXACT = ("latitude", "longitude")
 
 TOKEN = "__CE_REDACTED_{:04d}__"
+
+PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.DOTALL)
 
 # --------------------------------------------------------------------------
 # Logging
@@ -514,6 +535,49 @@ def extract_lovelace(name: str, data, snap: Path, stats: Stats) -> None:
         stats.errors.append(f"lovelace {name}: {err}")
 
 
+def generate_views(snap: Path, stats: Stats) -> None:
+    """Build the readable yaml/ and lovelace/ trees from the STAGED files.
+
+    Runs after redaction, so these trees can never hold more than the archive
+    they sit in.
+    """
+    for sub in ("config", "addon_configs"):
+        base = snap / sub
+        if not base.is_dir():
+            continue
+        for src in sorted(base.rglob("*.json")):
+            rel = src.relative_to(base)
+            convert_one(src, snap / "yaml" / sub / rel.with_suffix(".yaml"), stats)
+
+    storage = snap / "storage"
+    if storage.is_dir():
+        for src in sorted(p for p in storage.rglob("*") if p.is_file()):
+            if not looks_like_json(src):
+                continue
+            rel = src.relative_to(storage)
+            data = convert_one(src, snap / "yaml" / "storage" / f"{rel.name}.yaml", stats)
+            if data is not None and (rel.name == "lovelace" or rel.name.startswith("lovelace.")):
+                extract_lovelace(rel.name, data, snap, stats)
+
+
+def decode_external(name: str, content: bytes) -> bytes:
+    """Turn an API response into the document it represents.
+
+    Frigate's /api/config/raw returns the YAML config wrapped as a JSON string,
+    so saving the response verbatim produced a quoted, escaped blob that was
+    neither restorable nor redactable. Unwrap it into the real YAML file.
+    """
+    try:
+        decoded = json.loads(content.decode("utf-8"))
+    except Exception:
+        return content
+    if isinstance(decoded, str):
+        return decoded.encode("utf-8")
+    if isinstance(decoded, (dict, list)) and name.endswith((".yml", ".yaml")):
+        return to_yaml(decoded).encode("utf-8")
+    return content
+
+
 def fetch_http_source(source: dict) -> tuple[bytes | None, str]:
     """Return (content, note). Tries each url until one answers."""
     token = source.get("token") or os.environ.get(source.get("token_env", ""), "")
@@ -540,6 +604,7 @@ def fetch_http_sources(snap: Path, stats: Stats) -> None:
             log(f"  could not fetch {source['name']} — {note}")
             continue
         dest = snap / "external" / source["name"]
+        content = decode_external(source["name"], content)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
@@ -551,6 +616,13 @@ def fetch_http_sources(snap: Path, stats: Stats) -> None:
 
 
 def build_snapshot(snap: Path, config_dir: Path) -> Stats:
+    """Copy source files into the staging tree. Nothing is converted here.
+
+    Conversion happens in generate_views(), after redaction, so the readable
+    yaml/ and lovelace/ trees are always derived from what the archive holds.
+    Deriving them from the originals — as earlier versions did — meant every
+    converted copy of a redacted export still carried the real secrets.
+    """
     stats = Stats()
 
     log(f"Config directory: {config_dir}")
@@ -561,7 +633,6 @@ def build_snapshot(snap: Path, config_dir: Path) -> Stats:
             continue
         if src.suffix.lower() == ".json":
             stats.json_files += 1
-            convert_one(src, snap / "yaml" / "config" / rel.with_suffix(".yaml"), stats)
         else:
             stats.yaml_files += 1
 
@@ -570,24 +641,18 @@ def build_snapshot(snap: Path, config_dir: Path) -> Stats:
     for src, rel in iter_storage_files(storage):
         if not copy_one(src, snap / "storage" / rel, stats):
             continue
-        if not looks_like_json(src):
-            # Certificates, keys, pickles: kept verbatim, nothing to convert.
+        if looks_like_json(src):
+            stats.json_files += 1
+        else:
+            # Certificates, keys, pickles: copied verbatim. With redaction on
+            # they are withheld from the archive entirely — see redact_snapshot.
             stats.non_json += 1
-            continue
-        stats.json_files += 1
-        data = convert_one(src, snap / "yaml" / "storage" / f"{rel.name}.yaml", stats)
-        if data is not None and (rel.name == "lovelace" or rel.name.startswith("lovelace.")):
-            extract_lovelace(rel.name, data, snap, stats)
 
     # 3. Add-on configs (ESPHome etc.) when this process can reach them
     addon_count = 0
     for src, rel in iter_addon_configs():
         if copy_one(src, snap / "addon_configs" / rel, stats):
             addon_count += 1
-            if src.suffix.lower() == ".json":
-                convert_one(
-                    src, snap / "yaml" / "addon_configs" / rel.with_suffix(".yaml"), stats
-                )
     if addon_count:
         log(f"Add-on config files: {addon_count}")
     else:
@@ -674,13 +739,17 @@ def encrypt_file(path: Path, passphrase: str) -> Path:
 class Redactor:
     """Replaces credential-shaped values with tokens, remembering the originals.
 
-    This is a best-effort filter for making an export shareable, not a security
-    boundary. It works on key names and value shapes, so it will miss a secret
-    stored under an unusual key. Encryption is what actually protects an export.
+    Best-effort: it works on key names and value shapes, so a secret stored
+    under an unusual key in an unrecognised format can still survive it. Files
+    it cannot parse as text are withheld from the archive entirely rather than
+    guessed at. Encryption is what actually protects an export; redaction makes
+    one shareable.
     """
 
     def __init__(self) -> None:
         self.entries: dict[str, dict[str, str]] = {}
+        # rel path -> base64 of a file withheld from the archive
+        self.withheld: dict[str, str] = {}
         self._counter = 0
 
     def _token(self, rel: str, original, quoted: bool = True) -> str:
@@ -695,24 +764,41 @@ class Redactor:
         self.entries.setdefault(rel, {})[token] = entry
         return token
 
+    def _key_is_secret(self, name: str, value) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        if any(hint in name for hint in SECRET_KEY_HINTS):
+            return True
+        return name in SECRET_KEY_IF_SHAPED and bool(SECRET_SHAPE.match(value.strip()))
+
+    def _scrub(self, text: str, rel: str) -> str:
+        """Apply the value patterns to any string, wherever it came from.
+
+        Earlier versions only did this for YAML/text files, so a credential
+        inside a JSON string value — an rtsp:// URL under a key named "stream"
+        — was never looked at.
+        """
+        text = PEM_BLOCK.sub(lambda m: self._token(rel, m.group(0)), text)
+        for _name, pattern in VALUE_PATTERNS:
+            text = pattern.sub(lambda m: self._token(rel, m.group(0)), text)
+        return text
+
     def _walk_json(self, node, rel: str):
         if isinstance(node, dict):
             out = {}
             for key, value in node.items():
                 name = str(key).lower()
                 if name in SECRET_KEY_EXACT and isinstance(value, (int, float, str)):
-                    out[key] = self._token(
-                        rel, value, quoted=isinstance(value, str)
-                    )
-                elif isinstance(value, str) and value and any(
-                    hint in name for hint in SECRET_KEY_HINTS
-                ):
+                    out[key] = self._token(rel, value, quoted=isinstance(value, str))
+                elif self._key_is_secret(name, value):
                     out[key] = self._token(rel, value)
                 else:
                     out[key] = self._walk_json(value, rel)
             return out
         if isinstance(node, list):
             return [self._walk_json(item, rel) for item in node]
+        if isinstance(node, str):
+            return self._scrub(node, rel)
         return node
 
     def redact_json(self, text: str, rel: str) -> str | None:
@@ -723,14 +809,19 @@ class Redactor:
         return json.dumps(self._walk_json(data, rel), indent=2)
 
     def redact_text(self, text: str, rel: str) -> str:
+        text = PEM_BLOCK.sub(lambda m: self._token(rel, m.group(0)), text)
         out_lines = []
         for line in text.splitlines(keepends=True):
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
                 match = re.match(r"^(\s*[\"']?)([\w.-]+)([\"']?\s*:\s*)(.+?)(\s*)$", line)
-                if match and any(h in match.group(2).lower() for h in SECRET_KEY_HINTS):
+                if match:
+                    name = match.group(2).lower()
                     value = match.group(4).strip()
-                    if value and value not in ("{}", "[]", "null", "~"):
+                    bare = value.strip("\"'")
+                    if (value and value not in ("{}", "[]", "null", "~", "|", ">", "|-", ">-")
+                            and not value.startswith(("!secret", "!env_var"))
+                            and self._key_is_secret(name, bare)):
                         line = (match.group(1) + match.group(2) + match.group(3)
                                 + self._token(rel, value) + match.group(5))
             for _name, pattern in VALUE_PATTERNS:
@@ -756,9 +847,31 @@ class Redactor:
         path.write_text(new, encoding="utf-8")
         return True
 
+    def withhold(self, path: Path, rel: str) -> None:
+        """Move a file out of the archive and into the sidecar."""
+        import base64
+        self.withheld[rel] = base64.b64encode(path.read_bytes()).decode("ascii")
+        path.unlink()
+
+
+def is_opaque(path: Path) -> bool:
+    """A file redaction cannot see inside: binary, or a bare key or cert.
+
+    These are never guessed at. A pickle of session cookies, an ADB private
+    key or a certificate is one secret from end to end, so the only safe move
+    is to leave the whole file out.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    if PEM_BLOCK.search(text) or "-----BEGIN" in text:
+        return True
+    return path.suffix.lower() in (".pickle", ".pkl", ".key", ".pem", ".p12", ".pfx", ".der")
+
 
 def redact_snapshot(snap: Path, stats: "Stats") -> Redactor:
-    """Redact every verbatim copy in the staged snapshot."""
+    """Redact every verbatim copy in the staged snapshot, and withhold what it can't read."""
     redactor = Redactor()
     changed = 0
     for sub in ("config", "storage", "addon_configs", "external"):
@@ -769,11 +882,15 @@ def redact_snapshot(snap: Path, stats: "Stats") -> Redactor:
             if not path.is_file():
                 continue
             rel = f"{sub}/{path.relative_to(base).as_posix()}"
+            if is_opaque(path):
+                redactor.withhold(path, rel)
+                continue
             if redactor.apply(path, rel):
                 changed += 1
     stats.redacted_files = changed
     stats.redacted_values = redactor._counter  # noqa: SLF001
-    log(f"Redacted {redactor._counter} value(s) across {changed} file(s)")
+    log(f"Redacted {redactor._counter} value(s) across {changed} file(s); "
+        f"withheld {len(redactor.withheld)} opaque file(s)")
     return redactor
 
 
@@ -1119,7 +1236,6 @@ def main() -> int:
 
     try:
         stats = build_snapshot(staging, config_dir)
-        write_manifest(staging, config_dir, stats)
 
         passphrase = read_passphrase() if (ENCRYPT or ENCRYPT_SIDECAR) else None
         if (ENCRYPT or ENCRYPT_SIDECAR) and not passphrase:
@@ -1131,9 +1247,20 @@ def main() -> int:
 
         tags = tier_tags(started)
 
+        # Order matters: redact the raw files, THEN derive the readable views
+        # from them, THEN describe the result. Any other order leaks.
         redactor = redact_snapshot(staging, stats) if REDACT else None
+        generate_views(staging, stats)
+        write_manifest(staging, config_dir, stats)
 
-        if redactor and WRITE_SIDECAR and redactor.entries:
+        if redactor and WRITE_SIDECAR and not ENCRYPT_SIDECAR:
+            note = ("Sidecar is not encrypted: it holds every redacted value and "
+                    "withheld file in plaintext. Tick 'Encrypt the sidecar' before "
+                    "sharing or syncing anything alongside it.")
+            stats.warnings.append(note)
+            log(f"  WARNING: {note}")
+
+        if redactor and WRITE_SIDECAR and (redactor.entries or redactor.withheld):
             # Deliberately outside the archive. A sidecar sitting next to a
             # redacted backup would reduce redaction to obfuscation — the point
             # is that the archive can be shared or synced while this file stays
@@ -1143,7 +1270,8 @@ def main() -> int:
             payload = json.dumps(
                 {"generation": f"{FILE_PREFIX}{tags['daily']}",
                  "created": started.isoformat(timespec="seconds"),
-                 "entries": redactor.entries}, indent=2).encode("utf-8")
+                 "entries": redactor.entries,
+                 "withheld": redactor.withheld}, indent=2).encode("utf-8")
             sidecar = sidecar_dir / f"{FILE_PREFIX}{tags['daily']}.sidecar.json"
             if ENCRYPT_SIDECAR:
                 sidecar = sidecar.with_suffix(".json.enc")
