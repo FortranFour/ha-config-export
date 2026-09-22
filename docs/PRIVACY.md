@@ -24,15 +24,41 @@ You lose easy browsing and diffing; that is the trade.
 
 ## Redaction
 
-Ticking **Redact personal info** replaces credential-shaped values with tokens before
-archiving:
+> [!CAUTION]
+> **Versions before 1.3.0 did not redact the readable copies.** The `yaml/` and `lovelace/`
+> trees were generated from the original files before redaction ran, so a "redacted" export
+> still carried every secret in its converted YAML — API keys, integration passwords,
+> embedded camera credentials. Opaque files (keys, pickles) and Frigate's config were also
+> copied unredacted. If you shared a redacted export made with an earlier version, treat
+> every credential in it as exposed and rotate them.
+
+Ticking **Redact personal info** redacts the raw files first and only then builds the
+readable `yaml/` and `lovelace/` views from them, so no copy in the archive holds more than
+the redacted originals. It replaces credential-shaped values with tokens:
 
 - Values whose key name contains `password`, `token`, `api_key`, `secret`, `private_key`,
   `client_secret`, `access_token`, `refresh_token`, `session`, `cookie`, `credential`,
-  `auth`, `salt`, `hash`, `pin` or `license`
-- Email addresses
-- Credentials embedded in URLs, such as `rtsp://user:pass@camera/stream`
+  `auth`, `salt`, `hash`, `pin`, `license`, `webhook`, `cloudhook`, `jwt`, `psk`, `passcode`
+  and similar
+- Keys named `key`, `ota` or `encryption` when the value is secret-shaped — ESPHome's
+  `api: encryption: key:` — while leaving ordinary values such as a storage file's
+  `"key": "lovelace"` alone
+- Provider tokens recognisable by prefix wherever they appear, whatever key they sit under:
+  OpenAI and Anthropic keys, GitHub tokens, Google API keys, Slack tokens, JWTs, Nabu Casa
+  cloudhook IDs
+- Private key blocks (`-----BEGIN … PRIVATE KEY-----`)
+- Email addresses, and credentials embedded in URLs such as `rtsp://user:pass@camera/stream`
+  — now inside JSON string values as well as YAML
 - `latitude` and `longitude` in `.storage`
+
+**Files it cannot read are withheld, not guessed at.** Pickles, certificates, ADB keys and
+anything else that is not text are left out of a redacted archive entirely and stored in the
+sidecar instead. A file of session cookies is one secret from end to end; there is no safe
+partial redaction of it.
+
+**Frigate's config is decoded first.** Its API returns the YAML config wrapped as a JSON
+string. It is now unwrapped into the real YAML document before redaction, so it is both
+redactable and restorable.
 
 > [!WARNING]
 > **Redaction is best-effort, not a security boundary.** It works on key names and value
@@ -42,6 +68,15 @@ archiving:
 > makes an export safe.
 
 ## The sidecar
+
+The sidecar holds every redacted value **and every withheld file**, so it is the complete
+recovery set. It is written in plaintext unless **Encrypt the sidecar** is ticked, and the
+export log warns every run while it is not. Treat an unencrypted sidecar as the most
+sensitive file in the backup folder.
+
+Withheld files are not in the archive, so the restore card cannot offer them. They can be
+recovered from the sidecar's `withheld` section, which maps each path to its base64
+contents.
 
 Redaction on its own is one-way: the archive no longer contains the real values, so restoring
 from it gives you files full of `__CE_REDACTED_0001__`.
