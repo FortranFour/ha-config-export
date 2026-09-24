@@ -40,6 +40,11 @@ the redacted originals. It replaces credential-shaped values with tokens:
   `client_secret`, `access_token`, `refresh_token`, `session`, `cookie`, `credential`,
   `auth`, `salt`, `hash`, `pin`, `license`, `webhook`, `cloudhook`, `jwt`, `psk`, `passcode`
   and similar
+- Keys with `api` as a word in the name, in any position — `api_key`, `pv_API`, `weather_api`
+- Values that are credential-shaped whatever the key is called: 32, 40 or 64-character hex
+  and UUIDs, in text config files. Not applied inside `.storage`, which is full of hex entity
+  and device IDs, and skipped for keys that name an identifier
+- Credentials on commented-out lines, since commenting a key out does not retire it
 - Keys named `key`, `ota` or `encryption` when the value is secret-shaped — ESPHome's
   `api: encryption: key:` — while leaving ordinary values such as a storage file's
   `"key": "lovelace"` alone
