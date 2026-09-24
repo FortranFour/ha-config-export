@@ -171,6 +171,27 @@ SECRET_KEY_HINTS = (
     "encryption_key", "signing_key",
 )
 
+# Whole words that mark a key as holding a credential, matched on word
+# boundaries rather than as substrings: "pv_API" and "api_version" match,
+# "capabilities" does not. Substring matching on "api" would hit far too much.
+SECRET_KEY_WORDS = ("api", "apikey", "appkey", "authkey", "keyid")
+WORD_SPLIT = re.compile(r"[^a-z0-9]+")
+
+# Values that are credential-shaped whatever they are called: 32/40/64-char
+# hex, and UUIDs. Applied only to text config files — .storage is full of
+# 32-char hex entity and device IDs, and redacting those would replace
+# thousands of harmless identifiers.
+SECRET_VALUE_SHAPES = re.compile(
+    r"^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE)
+
+# Keys whose value is an identifier rather than a secret, even when it is
+# shaped like one.
+ID_KEYS = ("id", "unique_id", "entity_id", "device_id", "entry_id",
+           "config_entry_id", "area_id", "floor_id", "user_id", "uuid",
+           "webhook_id_local", "person_id", "label_id", "category_id")
+
 # Key names too generic to redact on sight — "key" is in every .storage
 # wrapper — but which hold a secret when the value is secret-shaped. ESPHome's
 # api: encryption: key: is the case that motivated this.
@@ -764,12 +785,20 @@ class Redactor:
         self.entries.setdefault(rel, {})[token] = entry
         return token
 
-    def _key_is_secret(self, name: str, value) -> bool:
+    def _key_is_secret(self, name: str, value, text_file: bool = False) -> bool:
         if not isinstance(value, str) or not value:
             return False
         if any(hint in name for hint in SECRET_KEY_HINTS):
             return True
-        return name in SECRET_KEY_IF_SHAPED and bool(SECRET_SHAPE.match(value.strip()))
+        words = [w for w in WORD_SPLIT.split(name) if w]
+        if any(w in SECRET_KEY_WORDS for w in words):
+            return True
+        if name in SECRET_KEY_IF_SHAPED and SECRET_SHAPE.match(value.strip()):
+            return True
+        # Shape-based catch, text files only — see SECRET_VALUE_SHAPES.
+        if text_file and name not in ID_KEYS and not name.endswith("_id"):
+            return bool(SECRET_VALUE_SHAPES.match(value.strip().strip("\"'")))
+        return False
 
     def _scrub(self, text: str, rel: str) -> str:
         """Apply the value patterns to any string, wherever it came from.
@@ -813,15 +842,18 @@ class Redactor:
         out_lines = []
         for line in text.splitlines(keepends=True):
             stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                match = re.match(r"^(\s*[\"']?)([\w.-]+)([\"']?\s*:\s*)(.+?)(\s*)$", line)
+            if stripped:
+                # Commented-out lines are checked too: a credential someone
+                # commented out rather than deleted is still a live credential.
+                match = re.match(
+                    r"^(\s*#*\s*[\"']?)([\w.-]+)([\"']?\s*:\s*)(.+?)(\s*)$", line)
                 if match:
                     name = match.group(2).lower()
                     value = match.group(4).strip()
                     bare = value.strip("\"'")
                     if (value and value not in ("{}", "[]", "null", "~", "|", ">", "|-", ">-")
                             and not value.startswith(("!secret", "!env_var"))
-                            and self._key_is_secret(name, bare)):
+                            and self._key_is_secret(name, bare, text_file=True)):
                         line = (match.group(1) + match.group(2) + match.group(3)
                                 + self._token(rel, value) + match.group(5))
             for _name, pattern in VALUE_PATTERNS:
